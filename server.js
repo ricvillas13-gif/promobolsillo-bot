@@ -31,6 +31,11 @@ app.post("/whatsapp", (req, res) => {
   res.send(twiml.toString());
 });
 
+// Ruta raíz para probar en navegador
+app.get("/", (req, res) => {
+  res.send("Promobolsillo bot está vivo ✅");
+});
+
 app.listen(PORT, () => {
   console.log(`🚀 Promobolsillo bot escuchando en puerto ${PORT}`);
 });
