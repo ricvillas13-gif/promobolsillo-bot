@@ -72,6 +72,7 @@ async function updateSheetValues(range, values) {
 // Estados de conversación
 // ==========================
 const STATE_MENU                     = "MENU_PRINCIPAL";
+
 const STATE_OPER_MENU                = "OPER_MENU";
 const STATE_OPER_VENTA               = "OPER_VENTA";              // venta rápida demo
 const STATE_OPER_ELEGIR_TIENDA       = "OPER_ELEGIR_TIENDA";
@@ -82,6 +83,12 @@ const STATE_OPER_COMP_ACTIVIDAD      = "OPER_COMP_ACTIVIDAD";
 
 const STATE_ACAD_MENU                = "ACADEMIA_MENU";
 const STATE_ACAD_RETO                = "ACADEMIA_RETO";
+
+const STATE_JORNADA_MENU              = "JORNADA_MENU";
+const STATE_JORNADA_FOTO_ENTRADA      = "JORNADA_FOTO_ENTRADA";
+const STATE_JORNADA_UBICACION_ENTRADA = "JORNADA_UBICACION_ENTRADA";
+const STATE_JORNADA_FOTO_SALIDA       = "JORNADA_FOTO_SALIDA";
+const STATE_JORNADA_UBICACION_SALIDA  = "JORNADA_UBICACION_SALIDA";
 
 // ==========================
 // Sesiones (hoja SESIONES)
@@ -266,9 +273,123 @@ async function getActividadesPorCompetidor(competidor) {
 }
 
 // ==========================
+// JORNADAS: entrada/salida
+// Hoja JORNADAS: 
+// [0] jornada_id, [1] telefono, [2] promotor_id, [3] fecha,
+// [4] hora_entrada, [5] lat_entrada, [6] lon_entrada, [7] foto_entrada_url,
+// [8] hora_salida, [9] lat_salida, [10] lon_salida, [11] foto_salida_url,
+// [12] estado (ABIERTA / CERRADA)
+// ==========================
+async function findJornadaById(jornada_id) {
+  const rows = await getSheetValues("JORNADAS!A2:M");
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    if (r[0] === jornada_id) {
+      return {
+        rowIndex: i + 2,
+        row: r,
+      };
+    }
+  }
+  return null;
+}
+
+async function getJornadaAbiertaPorTelefono(telefono) {
+  const rows = await getSheetValues("JORNADAS!A2:M");
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    const tel = r[1];
+    const estado = (r[12] || "").toString().toUpperCase();
+    const horaSalida = r[8];
+    if (tel === telefono && estado !== "CERRADA" && !horaSalida) {
+      return {
+        rowIndex: i + 2,
+        jornada_id: r[0],
+        telefono: r[1],
+        promotor_id: r[2],
+        fecha: r[3],
+        hora_entrada: r[4],
+        lat_entrada: r[5],
+        lon_entrada: r[6],
+        foto_entrada_url: r[7],
+        hora_salida: r[8],
+        lat_salida: r[9],
+        lon_salida: r[10],
+        foto_salida_url: r[11],
+        estado: r[12] || "",
+      };
+    }
+  }
+  return null;
+}
+
+async function crearJornadaEntrada(telefono, promotor_id) {
+  const jornada_id = "J-" + Date.now();
+  const now = new Date();
+  const fecha = now.toISOString().slice(0, 10); // yyyy-mm-dd
+  const hora_entrada = now.toISOString();
+
+  await appendSheetValues("JORNADAS!A2:M", [[
+    jornada_id,
+    telefono,
+    promotor_id || "",
+    fecha,
+    hora_entrada,
+    "", // lat_entrada
+    "", // lon_entrada
+    "", // foto_entrada_url
+    "", // hora_salida
+    "", // lat_salida
+    "", // lon_salida
+    "", // foto_salida_url
+    "ABIERTA"
+  ]]);
+
+  return jornada_id;
+}
+
+async function actualizarEntradaFoto(jornada_id, fotoUrl) {
+  const j = await findJornadaById(jornada_id);
+  if (!j) return;
+  const range = `JORNADAS!H${j.rowIndex}:H${j.rowIndex}`; // foto_entrada_url
+  await updateSheetValues(range, [[fotoUrl]]);
+}
+
+async function actualizarEntradaUbicacion(jornada_id, lat, lon) {
+  const j = await findJornadaById(jornada_id);
+  if (!j) return;
+  const range = `JORNADAS!F${j.rowIndex}:G${j.rowIndex}`; // lat_entrada, lon_entrada
+  await updateSheetValues(range, [[lat, lon]]);
+}
+
+async function registrarSalidaHora(jornada_id) {
+  const j = await findJornadaById(jornada_id);
+  if (!j) return;
+  const ahora = new Date().toISOString();
+  const range = `JORNADAS!I${j.rowIndex}:I${j.rowIndex}`; // hora_salida
+  await updateSheetValues(range, [[ahora]]);
+}
+
+async function actualizarSalidaFoto(jornada_id, fotoUrl) {
+  const j = await findJornadaById(jornada_id);
+  if (!j) return;
+  const range = `JORNADAS!L${j.rowIndex}:L${j.rowIndex}`; // foto_salida_url
+  await updateSheetValues(range, [[fotoUrl]]);
+}
+
+async function actualizarSalidaUbicacionYCerrar(jornada_id, lat, lon) {
+  const j = await findJornadaById(jornada_id);
+  if (!j) return;
+  const rangePos = `JORNADAS!J${j.rowIndex}:K${j.rowIndex}`; // lat_salida, lon_salida
+  await updateSheetValues(rangePos, [[lat, lon]]);
+  const rangeEstado = `JORNADAS!M${j.rowIndex}:M${j.rowIndex}`; // estado
+  await updateSheetValues(rangeEstado, [["CERRADA"]]);
+}
+
+// ==========================
 // Lógica principal
 // ==========================
-async function handleIncoming(telefono, body) {
+async function handleIncoming(telefono, body, inbound) {
   const text  = (body || "").trim();
   const lower = text.toLowerCase();
 
@@ -280,7 +401,8 @@ async function handleIncoming(telefono, body) {
       "¿Qué quieres hacer?\n" +
       "1️⃣ Operación en tienda\n" +
       "2️⃣ Academia (capacitaciones)\n" +
-      "3️⃣ Ver mis puntos"
+      "3️⃣ Ver mis puntos\n" +
+      "4️⃣ Mi jornada (entrada/salida)"
     );
   }
 
@@ -302,6 +424,7 @@ async function handleIncoming(telefono, body) {
   switch (estado) {
     case STATE_MENU:
       return await handleMenuPrincipal(telefono, text);
+
     case STATE_OPER_MENU:
     case STATE_OPER_VENTA:
     case STATE_OPER_ELEGIR_TIENDA:
@@ -310,9 +433,18 @@ async function handleIncoming(telefono, body) {
     case STATE_OPER_COMP_COMPETIDOR:
     case STATE_OPER_COMP_ACTIVIDAD:
       return await handleOperacion(telefono, estado, text, data);
+
     case STATE_ACAD_MENU:
     case STATE_ACAD_RETO:
       return await handleAcademia(telefono, estado, text, data);
+
+    case STATE_JORNADA_MENU:
+    case STATE_JORNADA_FOTO_ENTRADA:
+    case STATE_JORNADA_UBICACION_ENTRADA:
+    case STATE_JORNADA_FOTO_SALIDA:
+    case STATE_JORNADA_UBICACION_SALIDA:
+      return await handleJornada(telefono, estado, text, data, inbound);
+
     default:
       await setSession(telefono, STATE_MENU, {});
       return (
@@ -320,7 +452,8 @@ async function handleIncoming(telefono, body) {
         "¿Qué quieres hacer?\n" +
         "1️⃣ Operación en tienda\n" +
         "2️⃣ Academia (capacitaciones)\n" +
-        "3️⃣ Ver mis puntos"
+        "3️⃣ Ver mis puntos\n" +
+        "4️⃣ Mi jornada (entrada/salida)"
       );
   }
 }
@@ -329,14 +462,15 @@ async function handleIncoming(telefono, body) {
 // Menú principal
 // ==========================
 async function handleMenuPrincipal(telefono, text) {
-  if (!["1", "2", "3"].includes(text)) {
+  if (!["1", "2", "3", "4"].includes(text)) {
     await setSession(telefono, STATE_MENU, {});
     return (
       "👋 Hola, soy *Promobolsillo*.\n\n" +
       "¿Qué quieres hacer?\n" +
       "1️⃣ Operación en tienda\n" +
       "2️⃣ Academia (capacitaciones)\n" +
-      "3️⃣ Ver mis puntos\n\n" +
+      "3️⃣ Ver mis puntos\n" +
+      "4️⃣ Mi jornada (entrada/salida)\n\n" +
       "También puedes escribir *menu* en cualquier momento."
     );
   }
@@ -370,6 +504,11 @@ async function handleMenuPrincipal(telefono, text) {
       `🎯 Total: ${total}\n\n` +
       "Escribe *menu* para volver al inicio."
     );
+  }
+
+  if (text === "4") {
+    await setSession(telefono, STATE_JORNADA_MENU, {});
+    return await handleJornada(telefono, STATE_JORNADA_MENU, "", {}, {});
   }
 }
 
@@ -422,7 +561,8 @@ async function handleOperacion(telefono, estado, text, data) {
         "Volviendo al menú principal…\n\n" +
         "1️⃣ Operación en tienda\n" +
         "2️⃣ Academia (capacitaciones)\n" +
-        "3️⃣ Ver mis puntos"
+        "3️⃣ Ver mis puntos\n" +
+        "4️⃣ Mi jornada (entrada/salida)"
       );
     }
 
@@ -587,7 +727,6 @@ async function handleOperacion(telefono, estado, text, data) {
     let contestados = data.contestados || 0;
 
     if (!productos.length || idx >= productos.length) {
-      // Algo raro, regresar al menú de visita
       await setSession(telefono, STATE_OPER_VISITA_MENU, {
         visitaId: data.visitaId,
         promotor_id: data.promotor_id,
@@ -637,7 +776,6 @@ async function handleOperacion(telefono, estado, text, data) {
 
     idx++;
     if (idx >= productos.length) {
-      // Fin del inventario
       const pts = contestados > 0 ? contestados * 3 : 0;
       if (pts > 0) {
         await addPuntos(
@@ -666,7 +804,6 @@ async function handleOperacion(telefono, estado, text, data) {
       );
     }
 
-    // Continuar con el siguiente producto
     await setSession(telefono, STATE_OPER_INV_PROD, {
       visitaId: data.visitaId,
       promotor_id: data.promotor_id,
@@ -810,7 +947,6 @@ async function handleOperacion(telefono, estado, text, data) {
     );
   }
 
-  // Fallback
   await setSession(telefono, STATE_OPER_MENU, {});
   return (
     "🧰 *Operación en tienda*\n" +
@@ -821,7 +957,7 @@ async function handleOperacion(telefono, estado, text, data) {
 }
 
 // ==========================
-// Academia (se mantiene)
+// Academia
 // ==========================
 async function handleAcademia(telefono, estado, text, data) {
   if (estado === STATE_ACAD_MENU) {
@@ -859,7 +995,8 @@ async function handleAcademia(telefono, estado, text, data) {
         "Volviendo al menú principal…\n\n" +
         "1️⃣ Operación en tienda\n" +
         "2️⃣ Academia (capacitaciones)\n" +
-        "3️⃣ Ver mis puntos"
+        "3️⃣ Ver mis puntos\n" +
+        "4️⃣ Mi jornada (entrada/salida)"
       );
     }
 
@@ -945,17 +1082,194 @@ async function handleAcademia(telefono, estado, text, data) {
 }
 
 // ==========================
+// Jornada
+// ==========================
+async function handleJornada(telefono, estado, text, data, inbound) {
+  const numMedia = parseInt(inbound?.NumMedia || "0", 10);
+  const mediaUrl0 = inbound?.MediaUrl0 || "";
+  const lat = inbound?.Latitude || inbound?.Latitude0 || "";
+  const lon = inbound?.Longitude || inbound?.Longitude0 || "";
+
+  if (estado === STATE_JORNADA_MENU) {
+    const jornada = await getJornadaAbiertaPorTelefono(telefono);
+
+    if (!jornada) {
+      if (text === "1") {
+        const promotor = await getPromotorPorTelefono(telefono);
+        const jornada_id = await crearJornadaEntrada(
+          telefono,
+          promotor ? promotor.promotor_id : ""
+        );
+
+        await setSession(telefono, STATE_JORNADA_FOTO_ENTRADA, { jornada_id });
+
+        return (
+          "🕒 *Inicio de jornada*\n" +
+          "📸 Vamos a registrar tu *entrada*.\n\n" +
+          "Por favor envíame una *foto* (selfie en tienda o en el punto de venta)."
+        );
+      }
+
+      if (text === "2") {
+        await setSession(telefono, STATE_MENU, {});
+        return (
+          "Volviendo al menú principal…\n\n" +
+          "1️⃣ Operación en tienda\n" +
+          "2️⃣ Academia (capacitaciones)\n" +
+          "3️⃣ Ver mis puntos\n" +
+          "4️⃣ Mi jornada (entrada/salida)"
+        );
+      }
+
+      return (
+        "🕒 *Jornada de trabajo*\n" +
+        "No tienes una jornada abierta.\n\n" +
+        "1️⃣ Registrar entrada (foto + ubicación)\n" +
+        "2️⃣ Volver al menú principal"
+      );
+    }
+
+    const horaEntradaStr = jornada.hora_entrada || "";
+    const horaLocal = horaEntradaStr ? horaEntradaStr.substring(11, 16) : "";
+    const fecha = jornada.fecha || "";
+
+    if (text === "1") {
+      await registrarSalidaHora(jornada.jornada_id);
+      await setSession(telefono, STATE_JORNADA_FOTO_SALIDA, {
+        jornada_id: jornada.jornada_id,
+      });
+
+      return (
+        "🕒 *Cierre de jornada*\n" +
+        "📸 Por favor envíame una *foto de salida* (antes de irte de la tienda / ruta)."
+      );
+    }
+
+    if (text === "2") {
+      return (
+        "📋 *Jornada abierta*\n" +
+        `Fecha: *${fecha}*\n` +
+        (horaLocal ? `Hora de entrada: *${horaLocal}* (hora server)\n` : "") +
+        (jornada.lat_entrada && jornada.lon_entrada
+          ? `Ubicación de entrada: lat ${jornada.lat_entrada}, lon ${jornada.lon_entrada}\n`
+          : "") +
+        "\nOpciones:\n" +
+        "1️⃣ Registrar salida (foto + ubicación)\n" +
+        "3️⃣ Volver al menú principal"
+      );
+    }
+
+    if (text === "3") {
+      await setSession(telefono, STATE_MENU, {});
+      return (
+        "Volviendo al menú principal…\n\n" +
+        "1️⃣ Operación en tienda\n" +
+        "2️⃣ Academia (capacitaciones)\n" +
+        "3️⃣ Ver mis puntos\n" +
+        "4️⃣ Mi jornada (entrada/salida)"
+      );
+    }
+
+    return (
+      "🕒 *Jornada de trabajo*\n" +
+      `Tienes una jornada abierta del día *${fecha}*.\n\n` +
+      "1️⃣ Registrar salida (foto + ubicación)\n" +
+      "2️⃣ Ver detalle de jornada\n" +
+      "3️⃣ Volver al menú principal"
+    );
+  }
+
+  if (estado === STATE_JORNADA_FOTO_ENTRADA) {
+    if (!numMedia || numMedia < 1 || !mediaUrl0) {
+      return (
+        "Necesito que me envíes una *foto* para registrar tu entrada.\n" +
+        "Adjunta una foto y vuelve a enviar el mensaje."
+      );
+    }
+
+    const jornada_id = data.jornada_id;
+    await actualizarEntradaFoto(jornada_id, mediaUrl0);
+
+    await setSession(telefono, STATE_JORNADA_UBICACION_ENTRADA, { jornada_id });
+
+    return (
+      "✅ Foto de *entrada* registrada.\n\n" +
+      "📍 Ahora comparte tu *ubicación* desde WhatsApp (o escribe una breve descripción del lugar)."
+    );
+  }
+
+  if (estado === STATE_JORNADA_UBICACION_ENTRADA) {
+    const jornada_id = data.jornada_id;
+    const latUse = lat || "";
+    const lonUse = lon || "";
+
+    await actualizarEntradaUbicacion(jornada_id, latUse, lonUse);
+    await addPuntos(telefono, "OPERACION", `ENTRADA_JORNADA_${jornada_id}`, 3);
+
+    await setSession(telefono, STATE_JORNADA_MENU, {});
+
+    return (
+      "✅ Entrada de jornada registrada con éxito (foto + ubicación).\n\n" +
+      "Cuando termines tu jornada, entra de nuevo a *Mi jornada* para registrar tu salida."
+    );
+  }
+
+  if (estado === STATE_JORNADA_FOTO_SALIDA) {
+    if (!numMedia || numMedia < 1 || !mediaUrl0) {
+      return (
+        "Necesito que me envíes una *foto* para registrar tu salida.\n" +
+        "Adjunta una foto y vuelve a enviar el mensaje."
+      );
+    }
+
+    const jornada_id = data.jornada_id;
+    await actualizarSalidaFoto(jornada_id, mediaUrl0);
+
+    await setSession(telefono, STATE_JORNADA_UBICACION_SALIDA, { jornada_id });
+
+    return (
+      "✅ Foto de *salida* registrada.\n\n" +
+      "📍 Ahora comparte tu *ubicación de salida* desde WhatsApp (o escribe una breve descripción)."
+    );
+  }
+
+  if (estado === STATE_JORNADA_UBICACION_SALIDA) {
+    const jornada_id = data.jornada_id;
+    const latUse = lat || "";
+    const lonUse = lon || "";
+
+    await actualizarSalidaUbicacionYCerrar(jornada_id, latUse, lonUse);
+    await addPuntos(telefono, "OPERACION", `SALIDA_JORNADA_${jornada_id}`, 3);
+
+    await setSession(telefono, STATE_JORNADA_MENU, {});
+
+    return (
+      "✅ Jornada cerrada correctamente (foto + ubicación).\n\n" +
+      "🎯 Ganaste puntos adicionales por registrar tu jornada completa.\n\n" +
+      "Escribe *menu* para volver al menú principal."
+    );
+  }
+
+  await setSession(telefono, STATE_JORNADA_MENU, {});
+  return (
+    "🕒 *Jornada de trabajo*\n" +
+    "1️⃣ Registrar entrada (foto + ubicación)\n" +
+    "2️⃣ Volver al menú principal"
+  );
+}
+
+// ==========================
 // Rutas Express
 // ==========================
 app.post("/whatsapp", async (req, res) => {
   const from = req.body.From;
   const body = (req.body.Body || "").trim();
 
-  console.log("Mensaje entrante:", from, body);
+  console.log("Mensaje entrante:", from, body, "NumMedia:", req.body.NumMedia);
 
   let respuesta;
   try {
-    respuesta = await handleIncoming(from, body);
+    respuesta = await handleIncoming(from, body, req.body);
   } catch (err) {
     console.error("Error en handleIncoming:", err);
     respuesta =
@@ -971,7 +1285,7 @@ app.post("/whatsapp", async (req, res) => {
 
 // Ruta raíz para probar en navegador
 app.get("/", (req, res) => {
-  res.send("Promobolsillo bot está vivo ✅ (Sheets conectado, operación robusta)");
+  res.send("Promobolsillo bot está vivo ✅ (operación + jornada + academia)");
 });
 
 app.listen(PORT, () => {
