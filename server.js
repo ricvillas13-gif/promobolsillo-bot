@@ -10,7 +10,22 @@ const {
   PORT = 10000,
   SHEET_ID,
   GOOGLE_SERVICE_ACCOUNT_JSON,
+  TWILIO_ACCOUNT_SID,
+  TWILIO_AUTH_TOKEN,
+  TWILIO_WHATSAPP_FROM,
 } = process.env;
+
+// Cliente REST de Twilio (para reenviar fotos al cliente)
+let twilioClient = null;
+if (TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN) {
+  twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
+} else {
+  console.warn(
+    "⚠️ No se encontraron TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN en variables de entorno. " +
+      "El reenvío de fotos al cliente desde modo supervisor estará deshabilitado."
+  );
+}
+
 
 if (!SHEET_ID || !GOOGLE_SERVICE_ACCOUNT_JSON) {
   console.warn("⚠️ Falta SHEET_ID o GOOGLE_SERVICE_ACCOUNT_JSON en env vars");
