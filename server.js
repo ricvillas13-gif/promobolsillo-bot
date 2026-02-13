@@ -187,6 +187,13 @@ async function getEvidenciasHoy() {
     .filter((ev) => (ev.fecha_hora || "").slice(0, 10) === hoy);
 }
 
+// Evidencias de hoy filtradas por teléfono del promotor
+async function getEvidenciasHoyPorTelefono(telefono) {
+  const allHoy = await getEvidenciasHoy();
+  const telTrim = (telefono || "").trim();
+  return allHoy.filter((ev) => ev.telefono === telTrim);
+}
+
 // Opcionales: para enriquecer el texto hacia el cliente
 async function getVisitaPorId(visitaId) {
   if (!visitaId) return null;
@@ -330,7 +337,7 @@ const STATE_SUP_FOTOS_LIST = "SUP_FOTOS_LIST";
 const STATE_SUP_ELEGIR_GRUPO = "SUP_ELEGIR_GRUPO";
 const STATE_SUP_ASIST_PROM_LIST = "SUP_ASIST_PROM_LIST";
 
-// Operación en tienda
+// Operación en tienda (segunda vuelta, no expuesto en menú actual)
 const STATE_OPER_MENU = "OPER_MENU";
 const STATE_OPER_ELEGIR_TIENDA = "OPER_ELEGIR_TIENDA";
 const STATE_OPER_VISITA_MENU = "OPER_VISITA_MENU";
@@ -339,7 +346,7 @@ const STATE_OPER_COMP_COMPETIDOR = "OPER_COMP_COMPETIDOR";
 const STATE_OPER_COMP_ACTIVIDAD = "OPER_COMP_ACTIVIDAD";
 const STATE_OPER_VENTA = "OPER_VENTA";
 
-// Academia
+// Academia (segunda vuelta)
 const STATE_ACAD_MENU = "ACAD_MENU";
 const STATE_ACAD_RETO = "ACAD_RETO";
 
@@ -493,6 +500,7 @@ async function getTiendasParaPromotor(promotor) {
 }
 
 // PRODUCTOS: [producto_id, sku_barcode, nombre_producto, categoria, marca, es_foco, precio_sugerido]
+// (Operación en segunda vuelta)
 async function getProductosFoco() {
   const rows = await getSheetValues("PRODUCTOS!A2:G");
   if (!rows.length) return [];
@@ -512,6 +520,7 @@ async function getProductosFoco() {
 }
 
 // ACTIVIDADES_COMPETENCIA: [actividad_id, competidor, tipo_actividad, descripcion_corta, puntos]
+// (Operación en segunda vuelta)
 async function getCompetidoresCatalogo() {
   const rows = await getSheetValues("ACTIVIDADES_COMPETENCIA!A2:E");
   const set = new Set();
@@ -671,7 +680,6 @@ async function getJornadasPorTelefono(telefono, max = 10) {
     });
   }
 
-  // Ordenar por fecha+hora_entrada descendente (más reciente primero)
   lista.sort((a, b) => {
     const kA = (a.fecha || "") + (a.hora_entrada || "");
     const kB = (b.fecha || "") + (b.hora_entrada || "");
@@ -681,6 +689,28 @@ async function getJornadasPorTelefono(telefono, max = 10) {
   });
 
   return lista.slice(0, max);
+}
+
+// Construir mensaje de historial para promotor
+async function buildHistorialAsistenciasMsg(telefono) {
+  const jornadas = await getJornadasPorTelefono(telefono, 10);
+  if (!jornadas.length) {
+    return (
+      "📚 Aún no tengo asistencias históricas registradas para ti.\n\n" +
+      "Escribe *menu* para volver al inicio."
+    );
+  }
+
+  let msg =
+    `📚 *Historial de asistencias (últimas ${jornadas.length} jornadas)*\n\n`;
+  jornadas.forEach((j) => {
+    const fecha = j.fecha || "(sin fecha)";
+    const ent = j.hora_entrada ? j.hora_entrada.substring(11, 16) : "--:--";
+    const sal = j.hora_salida ? j.hora_salida.substring(11, 16) : "—";
+    msg += `• ${fecha} – Entrada ${ent} – Salida ${sal}\n`;
+  });
+  msg += "\nEscribe *menu* para volver al inicio.";
+  return msg;
 }
 
 // ==========================
@@ -702,7 +732,8 @@ function demoAnalisisPorTipo(tipo_evento) {
       };
     case "SALIDA_COMIDA":
       return {
-        resultado_ai: "Salida a comer registrada (demo). Fondo de pasillo / salida.",
+        resultado_ai:
+          "Salida a comer registrada (demo). Fondo de pasillo / salida.",
         score_confianza: 0.9,
         riesgo: "BAJO",
       };
@@ -770,18 +801,60 @@ async function registrarEvidencia({
   return { evidencia_id, resultado_ai, score_confianza, riesgo };
 }
 
+// Construir respuesta para "Ver mis evidencias de hoy"
+async function buildMisEvidenciasHoyRespuesta(telefono) {
+  const evidencias = await getEvidenciasHoyPorTelefono(telefono);
+  if (!evidencias.length) {
+    return (
+      "📷 Hoy no tengo evidencias registradas con tu número.\n\n" +
+      "Cuando captures fotos de asistencia o piso, aparecerán aquí."
+    );
+  }
+
+  evidencias.sort((a, b) => {
+    const fa = a.fecha_hora || "";
+    const fb = b.fecha_hora || "";
+    if (fa < fb) return -1;
+    if (fa > fb) return 1;
+    return 0;
+  });
+
+  let textoListado = "📷 *Tus evidencias de hoy*\n\n";
+  evidencias.forEach((ev, idx) => {
+    const hora = ev.fecha_hora ? ev.fecha_hora.substring(11, 16) : "";
+    textoListado += `${idx + 1}) ${hora} – ${ev.tipo_evento} – riesgo ${
+      ev.riesgo
+    }\n`;
+  });
+  textoListado += "\nTe envío las primeras fotos para revisión rápida.";
+
+  const respuestaArray = [];
+  respuestaArray.push({ text: textoListado });
+
+  const maxFotos = Math.min(evidencias.length, 5);
+  for (let i = 0; i < maxFotos; i++) {
+    const ev = evidencias[i];
+    if (!ev.url_foto) continue;
+    const hora = ev.fecha_hora ? ev.fecha_hora.substring(11, 16) : "";
+    const caption = `#${i + 1} – ${hora} – ${ev.tipo_evento} – riesgo ${
+      ev.riesgo
+    }`;
+    respuestaArray.push({ text: caption, mediaUrl: ev.url_foto });
+  }
+
+  return respuestaArray;
+}
+
 // ==========================
-// Menú principal
+// Menú principal (PROMOTOR)
 // ==========================
 function buildMenuPrincipal() {
   return (
     "👋 Hola, soy *Promobolsillo+*.\n\n" +
     "¿Qué quieres hacer?\n" +
-    "1️⃣ Mi día de trabajo (entrada, comida, salida – foto + geo)\n" +
-    "2️⃣ Operación en tienda 🏪\n" +
-    "3️⃣ Academia de bolsillo 🎓\n" +
-    "4️⃣ Auditoría de fotos 🧠📸\n" +
-    "5️⃣ Ver mis puntos 🎯\n\n" +
+    "1️⃣ Mi día de trabajo (asistencia: entrada/salida – foto + geo)\n" +
+    "2️⃣ Ver mis evidencias de hoy 📸\n" +
+    "3️⃣ Ver historial de mis asistencias 🕒\n\n" +
     "Puedes escribir *menu* en cualquier momento."
   );
 }
@@ -1177,7 +1250,7 @@ async function handleIncoming(telefono, body, inbound) {
   const supervisor = await getSupervisorPorTelefono(telefono);
   const isSupervisorState = SUP_STATES.has(estado);
 
-  // Comando global puntos
+  // Comando global puntos (lo mantenemos aunque ya no esté en menú)
   if (lower === "puntos") {
     const { operacion, capacitacion, total } = await getResumenPuntos(telefono);
     return (
@@ -1213,7 +1286,14 @@ async function handleIncoming(telefono, body, inbound) {
 
   // Si está en modo supervisor, delegamos a handleSupervisor
   if (isSupervisorState) {
-    return await handleSupervisor(telefono, supervisor, estado, text, data, inbound);
+    return await handleSupervisor(
+      telefono,
+      supervisor,
+      estado,
+      text,
+      data,
+      inbound
+    );
   }
 
   // Flujo promotor / estándar
@@ -1240,7 +1320,13 @@ async function handleIncoming(telefono, body, inbound) {
       return await handleAcademia(telefono, estado, text, data);
 
     case STATE_EVIDENCIA_FOTO:
-      return await handleEvidenciaDirecta(telefono, estado, text, data, inbound);
+      return await handleEvidenciaDirecta(
+        telefono,
+        estado,
+        text,
+        data,
+        inbound
+      );
 
     default:
       await setSession(telefono, STATE_MENU, {});
@@ -1249,16 +1335,13 @@ async function handleIncoming(telefono, body, inbound) {
 }
 
 // ==========================
-// Menú principal handler
+// Menú principal handler (PROMOTOR)
 // ==========================
 async function handleMenuPrincipal(telefono, text, inbound) {
-  if (!["1", "2", "3", "4", "5"].includes(text)) {
+  if (!["1", "2", "3"].includes(text)) {
     await setSession(telefono, STATE_MENU, {});
     return buildMenuPrincipal();
   }
-
-  const jornada = await getJornadaAbiertaPorTelefono(telefono);
-  const tieneJornada = !!jornada;
 
   // 1) Mi día de trabajo
   if (text === "1") {
@@ -1266,59 +1349,16 @@ async function handleMenuPrincipal(telefono, text, inbound) {
     return await handleDia(telefono, STATE_DIA_MENU, "", {}, inbound || {});
   }
 
-  // 2) Operación en tienda
+  // 2) Ver mis evidencias de hoy
   if (text === "2") {
-    if (!tieneJornada) {
-      return (
-        "Antes de operar en tienda registra tu *entrada del día* en la opción 1️⃣ *Mi día de trabajo*.\n\n" +
-        buildMenuPrincipal()
-      );
-    }
-    await setSession(telefono, STATE_OPER_MENU, {});
-    return (
-      "🧰 *Operación en tienda*\n" +
-      "1️⃣ Iniciar visita en tienda\n" +
-      "2️⃣ Registrar venta rápida (demo Modelo X)\n" +
-      "3️⃣ Volver al menú"
-    );
+    await setSession(telefono, STATE_MENU, {});
+    return await buildMisEvidenciasHoyRespuesta(telefono);
   }
 
-  // 3) Academia
+  // 3) Ver historial de asistencias
   if (text === "3") {
-    await setSession(telefono, STATE_ACAD_MENU, {});
-    return (
-      "🎓 *Academia de bolsillo*\n" +
-      "1️⃣ Reto del día\n" +
-      "2️⃣ Ver mis puntos de capacitación\n" +
-      "3️⃣ Volver al menú"
-    );
-  }
-
-  // 4) Auditoría de fotos directa
-  if (text === "4") {
-    await setSession(telefono, STATE_EVIDENCIA_FOTO, {
-      modo: "AUDITORIA_DIRECTA",
-    });
-    return (
-      "🧠📸 *Auditoría de fotos (EVIDENCIA+ demo)*\n\n" +
-      "Envíame una foto de:\n" +
-      "- Exhibición\n" +
-      "- Material POP\n" +
-      "- Promotor en piso\n\n" +
-      "y te doy un dictamen rápido."
-    );
-  }
-
-  // 5) Ver mis puntos
-  if (text === "5") {
-    const { operacion, capacitacion, total } = await getResumenPuntos(telefono);
-    return (
-      "📊 *Tus puntos actuales*\n" +
-      `🟦 Operación: ${operacion}\n` +
-      `🟨 Capacitación: ${capacitacion}\n` +
-      `🎯 Total: ${total}\n\n` +
-      "Escribe *menu* para volver al inicio."
-    );
+    await setSession(telefono, STATE_MENU, {});
+    return await buildHistorialAsistenciasMsg(telefono);
   }
 
   return buildMenuPrincipal();
@@ -1356,35 +1396,6 @@ async function handleDia(telefono, estado, text, data, inbound) {
       }
 
       if (text === "2") {
-        // Historial de asistencias
-        const jornadas = await getJornadasPorTelefono(telefono, 10);
-        if (!jornadas.length) {
-          return (
-            "📚 Aún no tengo asistencias históricas registradas para ti.\n" +
-            "Registra tu primera entrada con la opción 1️⃣.\n\n" +
-            "Escribe *menu* para volver al inicio."
-          );
-        }
-
-        let msg =
-          "📚 *Historial de asistencias (últimas " +
-          jornadas.length +
-          " jornadas)*\n\n";
-        jornadas.forEach((j) => {
-          const fecha = j.fecha || "(sin fecha)";
-          const ent = j.hora_entrada
-            ? j.hora_entrada.substring(11, 16)
-            : "--:--";
-          const sal = j.hora_salida
-            ? j.hora_salida.substring(11, 16)
-            : "—";
-          msg += `• ${fecha} – Entrada ${ent} – Salida ${sal}\n`;
-        });
-        msg += "\nEscribe *menu* para volver al inicio.";
-        return msg;
-      }
-
-      if (text === "3") {
         await setSession(telefono, STATE_MENU, {});
         return buildMenuPrincipal();
       }
@@ -1393,8 +1404,7 @@ async function handleDia(telefono, estado, text, data, inbound) {
         "🕒 *Mi día de trabajo*\n" +
         "No tengo registrada tu jornada de hoy.\n\n" +
         "1️⃣ Registrar entrada al día (foto + ubicación)\n" +
-        "2️⃣ Ver historial de mis asistencias\n" +
-        "3️⃣ Volver al menú"
+        "2️⃣ Volver al menú"
       );
     } else {
       // Jornada abierta
@@ -1455,32 +1465,6 @@ async function handleDia(telefono, estado, text, data, inbound) {
         );
       }
       if (text === "5") {
-        const jornadasHist = await getJornadasPorTelefono(telefono, 10);
-        if (!jornadasHist.length) {
-          return (
-            "📚 Aún no tengo asistencias históricas registradas para ti.\n" +
-            "Escribe *menu* para volver al inicio."
-          );
-        }
-
-        let msg =
-          "📚 *Historial de asistencias (últimas " +
-          jornadasHist.length +
-          " jornadas)*\n\n";
-        jornadasHist.forEach((j) => {
-          const fecha = j.fecha || "(sin fecha)";
-          const ent = j.hora_entrada
-            ? j.hora_entrada.substring(11, 16)
-            : "--:--";
-          const sal = j.hora_salida
-            ? j.hora_salida.substring(11, 16)
-            : "—";
-          msg += `• ${fecha} – Entrada ${ent} – Salida ${sal}\n`;
-        });
-        msg += "\nEscribe *menu* para volver al inicio.";
-        return msg;
-      }
-      if (text === "6") {
         await setSession(telefono, STATE_MENU, {});
         return buildMenuPrincipal();
       }
@@ -1492,8 +1476,7 @@ async function handleDia(telefono, estado, text, data, inbound) {
         "2️⃣ Regreso de comida (foto + ubicación)\n" +
         "3️⃣ Salida del día (foto + ubicación)\n" +
         "4️⃣ Ver detalles de mi jornada de hoy\n" +
-        "5️⃣ Ver historial de mis asistencias\n" +
-        "6️⃣ Volver al menú"
+        "5️⃣ Volver al menú"
       );
     }
   }
@@ -1622,554 +1605,30 @@ async function handleDia(telefono, estado, text, data, inbound) {
   return (
     "🕒 *Mi día de trabajo*\n" +
     "1️⃣ Registrar entrada / eventos del día\n" +
-    "2️⃣ Ver historial de mis asistencias\n" +
-    "3️⃣ Volver al menú"
+    "2️⃣ Volver al menú"
   );
 }
 
 // ==========================
-// 2) Operación en tienda
+// 2) Operación en tienda (segunda vuelta)
 // ==========================
 async function handleOperacion(telefono, estado, text, data) {
+  // Aunque está implementado, no se expone en el menú actual.
   if (estado === STATE_OPER_MENU) {
-    if (text === "1") {
-      const promotor = await getPromotorPorTelefono(telefono);
-      const tiendas = await getTiendasParaPromotor(promotor);
-
-      if (!tiendas.length) {
-        return (
-          "Por ahora no tengo tiendas configuradas para ti 🏪\n" +
-          "Revisa el catálogo en la hoja *TIENDAS*.\n\n" +
-          "Escribe *menu* para volver al inicio."
-        );
-      }
-
-      await setSession(telefono, STATE_OPER_ELEGIR_TIENDA, {
-        tiendas,
-        promotor_id: promotor ? promotor.promotor_id : "",
-      });
-
-      let msg = "🏪 *¿En qué tienda estás hoy?*\n";
-      tiendas.forEach((t, idx) => {
-        msg += `${idx + 1}) ${t.nombre_tienda} – ${t.cadena} (${t.ciudad})\n`;
-      });
-      msg += "\nResponde con el número de la tienda.";
-      return msg;
-    }
-
-    if (text === "2") {
-      await setSession(telefono, STATE_OPER_VENTA, {});
-      return (
-        "🛒 *Venta rápida demo*\n" +
-        "Producto: *Modelo X 128GB*\n\n" +
-        "¿Cuántas unidades vendiste hoy? (solo número)"
-      );
-    }
-
-    if (text === "3") {
-      await setSession(telefono, STATE_MENU, {});
-      return buildMenuPrincipal();
-    }
-
-    return (
-      "🧰 *Operación en tienda*\n" +
-      "1️⃣ Iniciar visita en tienda\n" +
-      "2️⃣ Registrar venta rápida (demo Modelo X)\n" +
-      "3️⃣ Volver al menú"
-    );
+    await setSession(telefono, STATE_MENU, {});
+    return buildMenuPrincipal();
   }
 
-  if (estado === STATE_OPER_ELEGIR_TIENDA) {
-    const tiendas = data.tiendas || [];
-    const n = parseInt(text, 10);
-    if (Number.isNaN(n) || n < 1 || n > tiendas.length) {
-      let msg = "Por favor elige una opción válida:\n\n";
-      tiendas.forEach((t, idx) => {
-        msg += `${idx + 1}) ${t.nombre_tienda} – ${t.cadena} (${t.ciudad})\n`;
-      });
-      msg += "\nResponde con el número de la tienda.";
-      return msg;
-    }
-
-    const tienda = tiendas[n - 1];
-    const visitaId = "V-" + Date.now();
-    const now = new Date();
-    const fecha = now.toISOString().slice(0, 10);
-    const horaInicio = now.toISOString();
-
-    const promotor_id = data.promotor_id || "";
-    await appendSheetValues("VISITAS!A2:G", [
-      [visitaId, promotor_id, tienda.tienda_id, fecha, horaInicio, "", ""],
-    ]);
-
-    await setSession(telefono, STATE_OPER_VISITA_MENU, {
-      visitaId,
-      promotor_id,
-      tienda_id: tienda.tienda_id,
-      tienda_nombre: tienda.nombre_tienda,
-      tienda_ciudad: tienda.ciudad,
-    });
-
-    return (
-      `📝 *Visita iniciada* en *${tienda.nombre_tienda}* (${tienda.ciudad}).\n\n` +
-      "1️⃣ Inventario de productos foco\n" +
-      "2️⃣ Actividad de la competencia\n" +
-      "3️⃣ Foto de exhibición (EVIDENCIA+ demo)\n" +
-      "4️⃣ Cerrar visita"
-    );
-  }
-
-  if (estado === STATE_OPER_VISITA_MENU) {
-    if (text === "1") {
-      const productos = await getProductosFoco();
-      if (!productos.length) {
-        return (
-          "No hay productos configurados en *PRODUCTOS* 📦\n" +
-          "Configura algunos y vuelve a intentar.\n\n" +
-          "Escribe *menu* para volver al inicio."
-        );
-      }
-
-      await setSession(telefono, STATE_OPER_INV_PROD, {
-        visitaId: data.visitaId,
-        promotor_id: data.promotor_id || "",
-        tienda_id: data.tienda_id,
-        tienda_nombre: data.tienda_nombre,
-        productos,
-        idx: 0,
-        contestados: 0,
-      });
-
-      const p = productos[0];
-      return (
-        "📦 *Inventario de productos foco*\n\n" +
-        `Producto 1 de ${productos.length}:\n` +
-        `*${p.nombre_producto}*\n\n` +
-        "¿Cuántas piezas ves en anaquel?\n" +
-        "Responde con un número o *s* para saltar."
-      );
-    }
-
-    if (text === "2") {
-      const competidores = await getCompetidoresCatalogo();
-      if (!competidores.length) {
-        return (
-          "No hay actividades de competencia configuradas en *ACTIVIDADES_COMPETENCIA* ⚔️\n" +
-          "Configúralas y vuelve a intentar.\n\n" +
-          "Escribe *menu* para volver al inicio."
-        );
-      }
-
-      await setSession(telefono, STATE_OPER_COMP_COMPETIDOR, {
-        visitaId: data.visitaId,
-        promotor_id: data.promotor_id || "",
-        tienda_id: data.tienda_id,
-        tienda_nombre: data.tienda_nombre,
-        competidores,
-      });
-
-      let msg = "⚔️ *Competencia en piso de venta*\n\n";
-      msg += "¿De qué competidor quieres registrar actividad?\n";
-      competidores.forEach((c, idx) => {
-        msg += `${idx + 1}) ${c}\n`;
-      });
-      msg += "\nResponde con el número del competidor.";
-      return msg;
-    }
-
-    if (text === "3") {
-      await setSession(telefono, STATE_EVIDENCIA_FOTO, {
-        modo: "FOTO_EXHIBICION",
-        visitaId: data.visitaId,
-      });
-      return "📸 Envía una *foto de la exhibición principal* de la marca para auditoría (demo).";
-    }
-
-    if (text === "4") {
-      const visitaId = data.visitaId;
-      const rows = await getSheetValues("VISITAS!A2:G");
-      let rowIndex = null;
-      for (let i = 0; i < rows.length; i++) {
-        if (rows[i][0] === visitaId) {
-          rowIndex = i + 2;
-          break;
-        }
-      }
-      if (rowIndex !== null) {
-        const now = new Date().toISOString();
-        const range = `VISITAS!F${rowIndex}:F${rowIndex}`;
-        await updateSheetValues(range, [[now]]);
-      }
-
-      await addPuntos(telefono, "OPERACION", `CIERRE_VISITA_${visitaId}`, 5);
-      await setSession(telefono, STATE_OPER_MENU, {});
-      return (
-        "✅ Visita cerrada.\n" +
-        "🎯 Ganaste *5 puntos* por completar la visita.\n\n" +
-        "🧰 *Operación en tienda*\n" +
-        "1️⃣ Iniciar otra visita\n" +
-        "2️⃣ Registrar venta rápida (demo)\n" +
-        "3️⃣ Volver al menú"
-      );
-    }
-
-    return (
-      "1️⃣ Inventario de productos foco\n" +
-      "2️⃣ Actividad de la competencia\n" +
-      "3️⃣ Foto de exhibición (EVIDENCIA+ demo)\n" +
-      "4️⃣ Cerrar visita"
-    );
-  }
-
-  if (estado === STATE_OPER_INV_PROD) {
-    const productos = data.productos || [];
-    let idx = data.idx || 0;
-    let contestados = data.contestados || 0;
-
-    if (!productos.length || idx >= productos.length) {
-      await setSession(telefono, STATE_OPER_VISITA_MENU, {
-        visitaId: data.visitaId,
-        promotor_id: data.promotor_id,
-        tienda_id: data.tienda_id,
-        tienda_nombre: data.tienda_nombre,
-      });
-      return (
-        "Terminé el inventario de productos foco.\n\n" +
-        "1️⃣ Inventario de productos foco\n" +
-        "2️⃣ Actividad de la competencia\n" +
-        "3️⃣ Foto de exhibición\n" +
-        "4️⃣ Cerrar visita"
-      );
-    }
-
-    const lower = text.toLowerCase();
-    let grabar = false;
-    let cantidad = 0;
-
-    if (lower === "s") {
-      // saltar
-    } else {
-      cantidad = Number(text);
-      if (Number.isNaN(cantidad) || cantidad < 0) {
-        const p = productos[idx];
-        return (
-          `Escribe un número válido para *${p.nombre_producto}* ` +
-          "o *s* para saltar."
-        );
-      }
-      grabar = true;
-    }
-
-    const p = productos[idx];
-
-    if (grabar) {
-      const fecha = new Date().toISOString().slice(0, 10);
-      await appendSheetValues("INVENTARIO!A2:F", [
-        [
-          data.visitaId,
-          data.promotor_id || "",
-          data.tienda_id,
-          p.producto_id,
-          cantidad,
-          fecha,
-        ],
-      ]);
-      contestados++;
-    }
-
-    idx++;
-    if (idx >= productos.length) {
-      const pts = contestados > 0 ? contestados * 3 : 0;
-      if (pts > 0) {
-        await addPuntos(
-          telefono,
-          "OPERACION",
-          `INVENTARIO_VISITA_${data.visitaId}`,
-          pts
-        );
-      }
-
-      await setSession(telefono, STATE_OPER_VISITA_MENU, {
-        visitaId: data.visitaId,
-        promotor_id: data.promotor_id,
-        tienda_id: data.tienda_id,
-        tienda_nombre: data.tienda_nombre,
-      });
-
-      return (
-        "✅ Inventario registrado.\n" +
-        `Productos respondidos: *${contestados}*.\n` +
-        (pts > 0 ? `🎯 Ganaste *${pts} puntos*.\n\n` : "\n") +
-        "1️⃣ Inventario de productos foco\n" +
-        "2️⃣ Actividad de la competencia\n" +
-        "3️⃣ Foto de exhibición\n" +
-        "4️⃣ Cerrar visita"
-      );
-    }
-
-    await setSession(telefono, STATE_OPER_INV_PROD, {
-      visitaId: data.visitaId,
-      promotor_id: data.promotor_id,
-      tienda_id: data.tienda_id,
-      tienda_nombre: data.tienda_nombre,
-      productos,
-      idx,
-      contestados,
-    });
-
-    const siguiente = productos[idx];
-    return (
-      "📦 *Inventario de productos foco*\n\n" +
-      `Producto ${idx + 1} de ${productos.length}:\n` +
-      `*${siguiente.nombre_producto}*\n\n` +
-      "¿Cuántas piezas ves en anaquel?\n" +
-      "Responde con un número o *s* para saltar."
-    );
-  }
-
-  if (estado === STATE_OPER_COMP_COMPETIDOR) {
-    const competidores = data.competidores || [];
-    const n = parseInt(text, 10);
-    if (Number.isNaN(n) || n < 1 || n > competidores.length) {
-      let msg = "Elige una opción válida:\n\n";
-      competidores.forEach((c, idx) => {
-        msg += `${idx + 1}) ${c}\n`;
-      });
-      msg += "\nResponde con el número del competidor.";
-      return msg;
-    }
-
-    const competidor = competidores[n - 1];
-    const actividades = await getActividadesPorCompetidor(competidor);
-    if (!actividades.length) {
-      await setSession(telefono, STATE_OPER_VISITA_MENU, {
-        visitaId: data.visitaId,
-        promotor_id: data.promotor_id,
-        tienda_id: data.tienda_id,
-        tienda_nombre: data.tienda_nombre,
-      });
-      return (
-        `No hay actividades configuradas para *${competidor}* ⚔️\n\n` +
-        "1️⃣ Inventario\n" +
-        "2️⃣ Actividad de la competencia\n" +
-        "3️⃣ Foto de exhibición\n" +
-        "4️⃣ Cerrar visita"
-      );
-    }
-
-    await setSession(telefono, STATE_OPER_COMP_ACTIVIDAD, {
-      visitaId: data.visitaId,
-      promotor_id: data.promotor_id,
-      tienda_id: data.tienda_id,
-      tienda_nombre: data.tienda_nombre,
-      competidor,
-      actividades,
-    });
-
-    let msg = `⚔️ *Actividades de ${competidor}*\n\n`;
-    actividades.forEach((a, idx) => {
-      msg += `${idx + 1}) ${a.tipo_actividad} – ${a.descripcion_corta}\n`;
-    });
-    msg += "\nResponde con el número de la actividad que viste.";
-    return msg;
-  }
-
-  if (estado === STATE_OPER_COMP_ACTIVIDAD) {
-    const actividades = data.actividades || [];
-    const n = parseInt(text, 10);
-    if (Number.isNaN(n) || n < 1 || n > actividades.length) {
-      let msg = `Elige una opción válida de *${data.competidor}*:\n\n`;
-      actividades.forEach((a, idx) => {
-        msg += `${idx + 1}) ${a.tipo_actividad} – ${a.descripcion_corta}\n`;
-      });
-      msg += "\nResponde con el número de la actividad.";
-      return msg;
-    }
-
-    const act = actividades[n - 1];
-    const pts = act.puntos || 0;
-    if (pts > 0) {
-      await addPuntos(
-        telefono,
-        "OPERACION",
-        `COMPETENCIA_${act.actividad_id}_${data.visitaId}`,
-        pts
-      );
-    }
-
-    await setSession(telefono, STATE_OPER_VISITA_MENU, {
-      visitaId: data.visitaId,
-      promotor_id: data.promotor_id,
-      tienda_id: data.tienda_id,
-      tienda_nombre: data.tienda_nombre,
-    });
-
-    return (
-      "✅ Actividad de competencia registrada.\n\n" +
-      `Competidor: *${act.competidor}*\n` +
-      `Actividad: *${act.tipo_actividad} – ${act.descripcion_corta}*\n` +
-      (pts > 0 ? `🎯 Ganaste *${pts} puntos*.\n\n` : "\n") +
-      "1️⃣ Inventario\n" +
-      "2️⃣ Actividad de la competencia\n" +
-      "3️⃣ Foto de exhibición\n" +
-      "4️⃣ Cerrar visita"
-    );
-  }
-
-  if (estado === STATE_OPER_VENTA) {
-    const unidades = Number(text);
-    if (Number.isNaN(unidades) || unidades < 0) {
-      return "Escribe solo el número de unidades vendidas (ej. 3).";
-    }
-
-    const fecha = new Date().toISOString();
-    const productoId = "PROD_X"; // demo
-
-    await appendSheetValues("VENTAS!A2:D", [[fecha, telefono, productoId, unidades]]);
-    await addPuntos(telefono, "OPERACION", "VENTA_DEMO", 10);
-    await setSession(telefono, STATE_OPER_MENU, {});
-
-    return (
-      "✅ Venta registrada.\n" +
-      "Producto: *Modelo X 128GB*\n" +
-      `Unidades: *${unidades}*\n\n` +
-      "🎯 Ganaste *10 puntos de operación*.\n" +
-      "1️⃣ Iniciar visita en tienda\n" +
-      "2️⃣ Registrar otra venta rápida\n" +
-      "3️⃣ Volver al menú"
-    );
-  }
-
-  await setSession(telefono, STATE_OPER_MENU, {});
-  return (
-    "🧰 *Operación en tienda*\n" +
-    "1️⃣ Iniciar visita en tienda\n" +
-    "2️⃣ Registrar venta rápida (demo Modelo X)\n" +
-    "3️⃣ Volver al menú"
-  );
+  await setSession(telefono, STATE_MENU, {});
+  return buildMenuPrincipal();
 }
 
 // ==========================
-// 3) Academia de bolsillo
+// 3) Academia de bolsillo (segunda vuelta)
 // ==========================
 async function handleAcademia(telefono, estado, text, data) {
-  if (estado === STATE_ACAD_MENU) {
-    if (text === "1") {
-      const rows = await getSheetValues("RETOS!A2:H");
-      if (!rows.length) {
-        return "Por ahora no hay retos configurados. 📭";
-      }
-      const [reto_id, pregunta, opcion_1, opcion_2, opcion_3] = rows[0];
-      await setSession(telefono, STATE_ACAD_RETO, { reto_id });
-      return (
-        "🎓 *Reto del día*\n\n" +
-        `${pregunta}\n\n` +
-        `1️⃣ ${opcion_1}\n` +
-        `2️⃣ ${opcion_2}\n` +
-        `3️⃣ ${opcion_3}\n\n` +
-        "Responde con 1, 2 o 3."
-      );
-    }
-
-    if (text === "2") {
-      const { operacion, capacitacion, total } = await getResumenPuntos(telefono);
-      return (
-        "📊 *Tus puntos de capacitación*\n" +
-        `🟨 Capacitación: ${capacitacion}\n` +
-        `🟦 Operación (referencia): ${operacion}\n` +
-        `🎯 Total: ${total}\n\n` +
-        "Escribe *menu* para volver al inicio."
-      );
-    }
-
-    if (text === "3") {
-      await setSession(telefono, STATE_MENU, {});
-      return buildMenuPrincipal();
-    }
-
-    return (
-      "🎓 *Academia de bolsillo*\n" +
-      "1️⃣ Reto del día\n" +
-      "2️⃣ Ver mis puntos de capacitación\n" +
-      "3️⃣ Volver al menú"
-    );
-  }
-
-  if (estado === STATE_ACAD_RETO) {
-    if (!["1", "2", "3"].includes(text)) {
-      return "Responde solo con 1, 2 o 3 😉";
-    }
-
-    const { reto_id } = data;
-    const rows = await getSheetValues("RETOS!A2:H");
-    const retoRow = rows.find((r) => r[0] === reto_id);
-    if (!retoRow) {
-      await setSession(telefono, STATE_ACAD_MENU, {});
-      return "Ocurrió un problema con el reto. Intenta de nuevo más tarde 🙏";
-    }
-
-    const [
-      _id,
-      pregunta,
-      opcion_1,
-      opcion_2,
-      opcion_3,
-      opcion_correcta,
-      puntos_ok,
-      puntos_error,
-    ] = retoRow;
-
-    const correctaNum = Number(opcion_correcta);
-    const respuestaNum = Number(text);
-    const es_correcta = correctaNum === respuestaNum;
-    const pts = es_correcta
-      ? Number(puntos_ok || 0)
-      : Number(puntos_error || 0);
-
-    const fecha_hora = new Date().toISOString();
-    await appendSheetValues("RESPUESTAS_RETOS!A2:F", [
-      [
-        fecha_hora,
-        telefono,
-        reto_id,
-        respuestaNum,
-        es_correcta ? "TRUE" : "FALSE",
-        pts,
-      ],
-    ]);
-
-    if (pts !== 0) {
-      await addPuntos(telefono, "CAPACITACION", `RETO_${reto_id}`, pts);
-    }
-
-    await setSession(telefono, STATE_ACAD_MENU, {});
-
-    const feedback = es_correcta
-      ? "✅ ¡Correcto!"
-      : `❌ La respuesta correcta era la opción ${opcion_correcta}.`;
-
-    return (
-      `${feedback}\n\n` +
-      `Pregunta: ${pregunta}\n` +
-      `1) ${opcion_1}\n` +
-      `2) ${opcion_2}\n` +
-      `3) ${opcion_3}\n\n` +
-      `🎯 Ganaste *${pts} puntos de capacitación*.\n\n` +
-      "¿Qué quieres hacer ahora?\n" +
-      "1️⃣ Reto del día\n" +
-      "2️⃣ Ver mis puntos de capacitación\n" +
-      "3️⃣ Volver al menú\n\n" +
-      "O escribe *menu* para ir al inicio."
-    );
-  }
-
-  await setSession(telefono, STATE_ACAD_MENU, {});
-  return (
-    "🎓 *Academia de bolsillo*\n" +
-    "1️⃣ Reto del día\n" +
-    "2️⃣ Ver mis puntos de capacitación\n" +
-    "3️⃣ Volver al menú"
-  );
+  await setSession(telefono, STATE_MENU, {});
+  return buildMenuPrincipal();
 }
 
 // ==========================
@@ -2250,8 +1709,16 @@ app.post("/whatsapp", async (req, res) => {
   }
 
   const twiml = new MessagingResponse();
+
   if (typeof respuesta === "string") {
     twiml.message(respuesta);
+  } else if (Array.isArray(respuesta)) {
+    respuesta.forEach((item) => {
+      const msg = twiml.message(item.text || "");
+      if (item.mediaUrl) {
+        msg.media(item.mediaUrl);
+      }
+    });
   } else if (respuesta && typeof respuesta === "object") {
     const msg = twiml.message(respuesta.text || "");
     if (respuesta.mediaUrl) {
@@ -2270,7 +1737,7 @@ app.post("/whatsapp", async (req, res) => {
 // Ruta raíz para probar en navegador
 app.get("/", (req, res) => {
   res.send(
-    "Promobolsillo+ demo está vivo ✅ (día + operación + academia + evidencias + supervisor)"
+    "Promobolsillo+ demo está vivo ✅ (asistencia + evidencias + supervisor)"
   );
 });
 
