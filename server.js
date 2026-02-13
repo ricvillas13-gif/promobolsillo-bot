@@ -4,7 +4,7 @@ import twilio from "twilio";
 import { google } from "googleapis";
 
 // ==========================
-// Configuración básica
+// Config básica
 // ==========================
 const {
   PORT = 10000,
@@ -15,6 +15,7 @@ const {
   TWILIO_WHATSAPP_FROM,
 } = process.env;
 
+// Cliente REST de Twilio (para reenviar fotos al cliente)
 let twilioClient = null;
 if (TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN) {
   twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
@@ -152,6 +153,7 @@ async function getGruposClienteActivos() {
     });
 }
 
+// Mapeo de fila de EVIDENCIAS a objeto
 function mapEvidRow(r) {
   return {
     evidencia_id: r[0] || "",
@@ -170,6 +172,7 @@ function mapEvidRow(r) {
   };
 }
 
+// Evidencias solo del día de hoy (por fecha YYYY-MM-DD)
 async function getEvidenciasHoy() {
   const rows = await getSheetValues("EVIDENCIAS!A2:M");
   if (!rows || !rows.length) return [];
@@ -180,6 +183,7 @@ async function getEvidenciasHoy() {
     .filter((ev) => (ev.fecha_hora || "").slice(0, 10) === hoy);
 }
 
+// Opcionales: para enriquecer el texto hacia el cliente
 async function getVisitaPorId(visitaId) {
   if (!visitaId) return null;
   const rows = await getSheetValues("VISITAS!A2:G");
@@ -219,6 +223,7 @@ async function getTiendaPorId(tiendaId) {
   return null;
 }
 
+// Envío real vía Twilio a los teléfonos del grupo del cliente
 async function enviarFotoAGrupoCliente(evidence, grupo) {
   if (!twilioClient || !TWILIO_WHATSAPP_FROM) {
     console.warn(
@@ -250,9 +255,9 @@ async function enviarFotoAGrupoCliente(evidence, grupo) {
       if (visita && visita.tienda_id) {
         const tienda = await getTiendaPorId(visita.tienda_id);
         if (tienda) {
-          tiendaTexto =
-            tienda.nombre_tienda +
-            (tienda.ciudad ? " (" + tienda.ciudad + ")" : "");
+          tiendaTexto = `${tienda.nombre_tienda}${
+            tienda.ciudad ? " (" + tienda.ciudad + ")" : ""
+          }`;
         }
       }
     }
@@ -260,21 +265,14 @@ async function enviarFotoAGrupoCliente(evidence, grupo) {
     console.error("Error buscando tienda por visita:", err);
   }
 
-  let textoBase =
+  const textoBase =
     "🏪 *Evidencia en punto de venta*\n" +
-    (grupo.cliente ? "👤 Cliente: " + grupo.cliente + "\n" : "") +
-    (tiendaTexto ? "🏬 Tienda: " + tiendaTexto + "\n" : "") +
-    "🧑‍💼 Promotor: " + nombrePromotor + "\n";
-  if (evidence.fecha_hora) {
-    textoBase += "📅 Fecha: " + evidence.fecha_hora + "\n";
-  }
-  textoBase +=
-    "🎯 Tipo: " +
-    evidence.tipo_evento +
-    "\n" +
-    "🧠 EVIDENCIA+ (demo) – Riesgo: " +
-    evidence.riesgo +
-    "\n";
+    (grupo.cliente ? `👤 Cliente: ${grupo.cliente}\n` : "") +
+    (tiendaTexto ? `🏬 Tienda: ${tiendaTexto}\n` : "") +
+    `🧑‍💼 Promotor: ${nombrePromotor}\n` +
+    (evidence.fecha_hora ? `📅 Fecha: ${evidence.fecha_hora}\n` : "") +
+    `🎯 Tipo: ${evidence.tipo_evento}\n` +
+    `🧠 EVIDENCIA+ (demo) – Riesgo: ${evidence.riesgo}\n`;
 
   let enviados = 0;
   for (const telDestino of grupo.telefonos) {
@@ -294,17 +292,325 @@ async function enviarFotoAGrupoCliente(evidence, grupo) {
   return { ok: enviados > 0, enviados };
 }
 
+// ===============================
+// Menú y flujo para SUPERVISOR
+// ===============================
+
+function buildSupervisorMenu(supervisor) {
+  const nombre = supervisor?.nombre || "Supervisor";
+  return (
+    `👋 Hola, *${nombre}* (Supervisor).\n\n` +
+    "¿Qué quieres hacer hoy?\n" +
+    "1️⃣ Ver evidencias de *hoy* por promotor\n" +
+    "2️⃣ Ver evidencias de *hoy* con riesgo MEDIO/ALTO 🧠📸\n" +
+    "3️⃣ Ver menú estándar de promotor (demo)\n\n" +
+    "Escribe el número de la opción o *menu* en cualquier momento."
+  );
+}
+
+async function handleSupervisor(
+  telefonoSupervisor,
+  supervisor,
+  estado,
+  text,
+  data,
+  inbound
+) {
+  const lower = (text || "").trim().toLowerCase();
+
+  if (!supervisor) {
+    // Ya no está dado de alta como supervisor
+    await setSession(telefonoSupervisor, STATE_MENU, {});
+    return (
+      "⚠️ Tu número ya no aparece como supervisor. Escribe *menu* para usar el bot como promotor."
+    );
+  }
+
+  // -------- MENÚ PRINCIPAL SUPERVISOR --------
+  if (estado === STATE_SUP_MENU) {
+    if (lower === "1" || lower === "1️⃣") {
+      const promotores = await getPromotoresDeSupervisor(telefonoSupervisor);
+      if (!promotores.length) {
+        return (
+          "⚠️ No hay promotores asociados a tu número en la hoja PROMOTORES.\n" +
+          "Pide que te asignen promotores con la columna *telefono_supervisor*."
+        );
+      }
+
+      const evidenciasHoy = await getEvidenciasHoy();
+      const conteos = {};
+      for (const ev of evidenciasHoy) {
+        conteos[ev.telefono] = (conteos[ev.telefono] || 0) + 1;
+      }
+
+      let msg = "👀 *Evidencias de hoy por promotor*\n\n";
+      promotores.forEach((p, idx) => {
+        const cuenta = conteos[p.telefono] || 0;
+        msg += `${idx + 1}) ${p.nombre} – ${cuenta} foto(s)\n`;
+      });
+      msg +=
+        "\nResponde con el *número* del promotor para ver el detalle.\n" +
+        "O escribe *menu* para volver.";
+
+      await setSession(telefonoSupervisor, STATE_SUP_PROMOTOR_LIST, {
+        promotores,
+      });
+
+      return msg;
+    }
+
+    if (lower === "2" || lower === "2️⃣") {
+      const promotores = await getPromotoresDeSupervisor(telefonoSupervisor);
+      if (!promotores.length) {
+        return (
+          "⚠️ No hay promotores asociados a tu número en la hoja PROMOTORES.\n" +
+          "Pide que te asignen promotores con la columna *telefono_supervisor*."
+        );
+      }
+
+      const telefonosEquipo = new Set(promotores.map((p) => p.telefono));
+      const evidenciasHoy = await getEvidenciasHoy();
+      const mapTelNombre = {};
+      promotores.forEach((p) => {
+        mapTelNombre[p.telefono] = p.nombre;
+      });
+
+      const filtradas = evidenciasHoy
+        .filter(
+          (ev) =>
+            telefonosEquipo.has(ev.telefono) &&
+            (ev.riesgo === "MEDIO" || ev.riesgo === "ALTO")
+        )
+        .map((ev) => ({
+          ...ev,
+          promotor_nombre: mapTelNombre[ev.telefono] || ev.telefono,
+        }));
+
+      if (!filtradas.length) {
+        return (
+          "🧠📸 Hoy no hay evidencias con riesgo MEDIO/ALTO para tu equipo.\n" +
+          "Escribe *menu* para otras opciones."
+        );
+      }
+
+      let msg = "🧠📸 *Evidencias de hoy con riesgo MEDIO/ALTO*\n\n";
+      filtradas.forEach((ev, idx) => {
+        msg += `${idx + 1}) ${ev.tipo_evento} – ${ev.promotor_nombre} – riesgo ${ev.riesgo}\n`;
+      });
+      msg +=
+        "\nEscribe por ejemplo:\n" +
+        "• `ver 2`  → para ver la evidencia 2\n" +
+        "• `enviar 2` → para reenviarla al cliente\n" +
+        "• `menu` → volver al menú de supervisor";
+
+      await setSession(telefonoSupervisor, STATE_SUP_FOTOS_LIST, {
+        modo: "RIESGO",
+        listado: filtradas,
+      });
+
+      return msg;
+    }
+
+    if (lower === "3" || lower === "3️⃣") {
+      // Volver al menú estándar de promotor
+      await setSession(telefonoSupervisor, STATE_MENU, {});
+      return "Has vuelto al menú estándar. Escribe *menu* para ver las opciones como promotor.";
+    }
+
+    // Cualquier otra cosa, re-mostramos menú
+    return buildSupervisorMenu(supervisor);
+  }
+
+  // -------- ELECCIÓN DE PROMOTOR --------
+  if (estado === STATE_SUP_PROMOTOR_LIST) {
+    if (lower === "menu" || lower === "inicio") {
+      await setSession(telefonoSupervisor, STATE_SUP_MENU, {});
+      return buildSupervisorMenu(supervisor);
+    }
+
+    const promotores = data.promotores || [];
+    const n = parseInt(text, 10);
+    if (Number.isNaN(n) || n < 1 || n > promotores.length) {
+      let msg = "Elige un número válido de promotor:\n\n";
+      promotores.forEach((p, idx) => {
+        msg += `${idx + 1}) ${p.nombre}\n`;
+      });
+      msg += "\nO escribe *menu* para volver.";
+      return msg;
+    }
+
+    const prom = promotores[n - 1];
+    const evidenciasHoy = await getEvidenciasHoy();
+    const listado = evidenciasHoy
+      .filter((ev) => ev.telefono === prom.telefono)
+      .map((ev) => ({
+        ...ev,
+        promotor_nombre: prom.nombre,
+      }));
+
+    if (!listado.length) {
+      await setSession(telefonoSupervisor, STATE_SUP_MENU, {});
+      return (
+        `⚠️ Hoy no hay evidencias registradas para *${prom.nombre}*.\n` +
+        "Escribe *menu* para volver al menú de supervisor."
+      );
+    }
+
+    let msg = `📷 *Evidencias de hoy de ${prom.nombre}*\n\n`;
+    listado.forEach((ev, idx) => {
+      msg += `${idx + 1}) ${ev.tipo_evento} – riesgo ${ev.riesgo}\n`;
+    });
+    msg +=
+      "\nEscribe por ejemplo:\n" +
+      "• `ver 1`  → para ver la evidencia 1\n" +
+      "• `enviar 1` → para reenviarla al cliente\n" +
+      "• `menu` → volver al menú de supervisor";
+
+    await setSession(telefonoSupervisor, STATE_SUP_FOTOS_LIST, {
+      modo: "POR_PROMOTOR",
+      promotor_nombre: prom.nombre,
+      promotor_telefono: prom.telefono,
+      listado,
+    });
+
+    return msg;
+  }
+
+  // -------- LISTADO DE FOTOS (ver / enviar) --------
+  if (estado === STATE_SUP_FOTOS_LIST) {
+    const listado = data.listado || [];
+
+    if (lower === "menu" || lower === "inicio") {
+      await setSession(telefonoSupervisor, STATE_SUP_MENU, {});
+      return buildSupervisorMenu(supervisor);
+    }
+
+    const verMatch = lower.match(/^ver\s+(\d+)/);
+    const enviarMatch = lower.match(/^enviar\s+(\d+)/);
+
+    if (verMatch) {
+      const idx = parseInt(verMatch[1], 10) - 1;
+      if (Number.isNaN(idx) || idx < 0 || idx >= listado.length) {
+        return "⚠️ Número inválido. Usa por ejemplo `ver 1` o `enviar 1`, o escribe *menu* para volver.";
+      }
+      const ev = listado[idx];
+
+      const texto =
+        `🧾 *Detalle de evidencia ${idx + 1}*\n` +
+        (ev.promotor_nombre ? `👤 Promotor: ${ev.promotor_nombre}\n` : "") +
+        (ev.fecha_hora ? `📅 Fecha: ${ev.fecha_hora}\n` : "") +
+        `🎯 Tipo: ${ev.tipo_evento}\n` +
+        `🧠 EVIDENCIA+ (demo): ${
+          ev.resultado_ai || "Evidencia registrada."
+        }\n` +
+        `⚠️ Riesgo: ${ev.riesgo}\n\n` +
+        "Puedes escribir:\n" +
+        `• \`enviar ${idx + 1}\` → para reenviar esta evidencia al cliente\n` +
+        "• `menu` → volver al menú de supervisor";
+
+      return {
+        text: texto,
+        mediaUrl: ev.url_foto || null,
+      };
+    }
+
+    if (enviarMatch) {
+      const idx = parseInt(enviarMatch[1], 10) - 1;
+      if (Number.isNaN(idx) || idx < 0 || idx >= listado.length) {
+        return "⚠️ Número inválido. Usa por ejemplo `ver 1` o `enviar 1`, o escribe *menu* para volver.";
+      }
+
+      const ev = listado[idx];
+      const grupos = await getGruposClienteActivos();
+      if (!grupos.length) {
+        return (
+          "⚠️ No hay grupos de cliente activos en la hoja GRUPOS_CLIENTE.\n" +
+          "Da de alta al menos un grupo antes de usar esta opción."
+        );
+      }
+
+      let msg =
+        "📤 *Enviar evidencia al cliente*\n\n¿A qué grupo quieres enviarla?\n\n";
+      grupos.forEach((g, i) => {
+        msg += `${i + 1}) ${g.nombre_grupo}`;
+        if (g.cliente) msg += ` – ${g.cliente}`;
+        msg += "\n";
+      });
+      msg += "\nResponde con el *número* del grupo o escribe *menu* para cancelar.";
+
+      await setSession(telefonoSupervisor, STATE_SUP_ELEGIR_GRUPO, {
+        evidenciaSeleccionada: ev,
+        grupos,
+      });
+
+      return msg;
+    }
+
+    return (
+      "⚠️ No entendí tu respuesta.\n" +
+      "Usa por ejemplo `ver 1`, `enviar 1` o escribe *menu* para volver."
+    );
+  }
+
+  // -------- ELECCIÓN DE GRUPO PARA ENVÍO --------
+  if (estado === STATE_SUP_ELEGIR_GRUPO) {
+    const grupos = data.grupos || [];
+    const ev = data.evidenciaSeleccionada;
+
+    if (
+      lower === "menu" ||
+      lower === "cancelar" ||
+      lower === "no"
+    ) {
+      await setSession(telefonoSupervisor, STATE_SUP_MENU, {});
+      return buildSupervisorMenu(supervisor);
+    }
+
+    const n = parseInt(text, 10);
+    if (Number.isNaN(n) || n < 1 || n > grupos.length) {
+      let msg = "⚠️ Número inválido. Elige uno de los siguientes grupos:\n\n";
+      grupos.forEach((g, i) => {
+        msg += `${i + 1}) ${g.nombre_grupo}`;
+        if (g.cliente) msg += ` – ${g.cliente}`;
+        msg += "\n";
+      });
+      msg += "\nO escribe *menu* para cancelar.";
+      return msg;
+    }
+
+    const grupo = grupos[n - 1];
+    const resultado = await enviarFotoAGrupoCliente(ev, grupo);
+
+    await setSession(telefonoSupervisor, STATE_SUP_MENU, {});
+
+    if (!resultado.ok) {
+      return (
+        "⚠️ No se pudo enviar la evidencia al cliente. Revisa que las variables de entorno de Twilio estén configuradas.\n" +
+        "Escribe *menu* para volver al menú de supervisor."
+      );
+    }
+
+    return (
+      `✅ Evidencia enviada al grupo *${grupo.nombre_grupo}* (${resultado.enviados} contacto(s)).\n\n` +
+      "Escribe *menu* para volver al menú de supervisor."
+    );
+  }
+
+  // Por defecto, regresa al menú
+  await setSession(telefonoSupervisor, STATE_SUP_MENU, {});
+  return buildSupervisorMenu(supervisor);
+}
+
 // ==========================
 // Estados de conversación
 // ==========================
 const STATE_MENU = "MENU_PRINCIPAL";
 
-// Día de trabajo / jornada
+// Mi día de trabajo
 const STATE_DIA_MENU = "DIA_MENU";
 const STATE_JORNADA_FOTO_SUBEVENTO = "JORNADA_FOTO_SUBEVENTO";
 const STATE_JORNADA_UBICACION_SUBEVENTO = "JORNADA_UBICACION_SUBEVENTO";
 
-// Supervisor
 const STATE_SUP_MENU = "SUP_MENU";
 const STATE_SUP_PROMOTOR_LIST = "SUP_PROMOTOR_LIST";
 const STATE_SUP_FOTOS_LIST = "SUP_FOTOS_LIST";
@@ -369,7 +675,7 @@ async function setSession(telefono, estado_actual, data_json = {}) {
       [telefono, estado_actual, dataStr],
     ]);
   } else {
-    const range = "SESIONES!A" + sesion.rowIndex + ":C" + sesion.rowIndex;
+    const range = `SESIONES!A${sesion.rowIndex}:C${sesion.rowIndex}`;
     await updateSheetValues(range, [[telefono, estado_actual, dataStr]]);
   }
 }
@@ -411,7 +717,7 @@ async function getResumenPuntos(telefono) {
 
 // PROMOTORES: [telefono, promotor_id, nombre, region, cadena_principal, activo, telefono_supervisor]
 async function getPromotorPorTelefono(telefono) {
-  const rows = await getSheetValues("PROMOTORES!A2:F");
+  const rows = await getSheetValues("PROMOTORES!A2:G");
   for (const row of rows) {
     if (row[0] === telefono) {
       const activo = (row[5] || "").toString().toUpperCase() === "TRUE";
@@ -433,13 +739,13 @@ async function getTiendasParaPromotor(promotor) {
   const rows = await getSheetValues("TIENDAS!A2:F");
   if (!rows.length) return [];
 
-  const activas = rows.filter(function (r) {
-    return (r[5] || "").toString().toUpperCase() === "TRUE";
-  });
+  const activas = rows.filter(
+    (r) => (r[5] || "").toString().toUpperCase() === "TRUE"
+  );
 
   let filtradas = activas;
   if (promotor) {
-    filtradas = activas.filter(function (r) {
+    filtradas = activas.filter((r) => {
       const region = r[4];
       const cadena = r[2];
       const okRegion =
@@ -454,36 +760,32 @@ async function getTiendasParaPromotor(promotor) {
   }
 
   const top = filtradas.slice(0, 6);
-  return top.map(function (r) {
-    return {
-      tienda_id: r[0],
-      nombre_tienda: r[1],
-      cadena: r[2],
-      ciudad: r[3],
-      region: r[4],
-    };
-  });
+  return top.map((r) => ({
+    tienda_id: r[0],
+    nombre_tienda: r[1],
+    cadena: r[2],
+    ciudad: r[3],
+    region: r[4],
+  }));
 }
 
 // PRODUCTOS: [producto_id, sku_barcode, nombre_producto, categoria, marca, es_foco, precio_sugerido]
 async function getProductosFoco() {
   const rows = await getSheetValues("PRODUCTOS!A2:G");
   if (!rows.length) return [];
-  const foco = rows.filter(function (r) {
-    return (r[5] || "").toString().toUpperCase() === "TRUE";
-  });
+  const foco = rows.filter(
+    (r) => (r[5] || "").toString().toUpperCase() === "TRUE"
+  );
   const lista = (foco.length ? foco : rows).slice(0, 6);
-  return lista.map(function (r) {
-    return {
-      producto_id: r[0],
-      sku_barcode: r[1],
-      nombre_producto: r[2],
-      categoria: r[3],
-      marca: r[4],
-      es_foco: (r[5] || "").toString().toUpperCase() === "TRUE",
-      precio_sugerido: r[6],
-    };
-  });
+  return lista.map((r) => ({
+    producto_id: r[0],
+    sku_barcode: r[1],
+    nombre_producto: r[2],
+    categoria: r[3],
+    marca: r[4],
+    es_foco: (r[5] || "").toString().toUpperCase() === "TRUE",
+    precio_sugerido: r[6],
+  }));
 }
 
 // ACTIVIDADES_COMPETENCIA: [actividad_id, competidor, tipo_actividad, descripcion_corta, puntos]
@@ -499,22 +801,18 @@ async function getCompetidoresCatalogo() {
 
 async function getActividadesPorCompetidor(competidor) {
   const rows = await getSheetValues("ACTIVIDADES_COMPETENCIA!A2:E");
-  const filtradas = rows.filter(function (r) {
-    return (r[1] || "").toString() === competidor;
-  });
-  return filtradas.map(function (r) {
-    return {
-      actividad_id: r[0],
-      competidor: r[1],
-      tipo_actividad: r[2],
-      descripcion_corta: r[3],
-      puntos: Number(r[4] || 0),
-    };
-  });
+  const filtradas = rows.filter((r) => (r[1] || "").toString() === competidor);
+  return filtradas.map((r) => ({
+    actividad_id: r[0],
+    competidor: r[1],
+    tipo_actividad: r[2],
+    descripcion_corta: r[3],
+    puntos: Number(r[4] || 0),
+  }));
 }
 
 // ==========================
-// JORNADAS (entrada/salida día)
+// JORNADAS (sólo entrada/salida día)
 // Hoja JORNADAS:
 // [0] jornada_id, [1] telefono, [2] promotor_id, [3] fecha,
 // [4] hora_entrada, [5] lat_entrada, [6] lon_entrada, [7] foto_entrada_url,
@@ -591,14 +889,14 @@ async function crearJornadaEntrada(telefono, promotor_id) {
 async function actualizarEntradaFoto(jornada_id, fotoUrl) {
   const j = await findJornadaById(jornada_id);
   if (!j) return;
-  const range = "JORNADAS!H" + j.rowIndex + ":H" + j.rowIndex;
+  const range = `JORNADAS!H${j.rowIndex}:H${j.rowIndex}`;
   await updateSheetValues(range, [[fotoUrl]]);
 }
 
 async function actualizarEntradaUbicacion(jornada_id, lat, lon) {
   const j = await findJornadaById(jornada_id);
   if (!j) return;
-  const range = "JORNADAS!F" + j.rowIndex + ":G" + j.rowIndex;
+  const range = `JORNADAS!F${j.rowIndex}:G${j.rowIndex}`;
   await updateSheetValues(range, [[lat, lon]]);
 }
 
@@ -606,23 +904,23 @@ async function registrarSalidaHora(jornada_id) {
   const j = await findJornadaById(jornada_id);
   if (!j) return;
   const ahora = new Date().toISOString();
-  const range = "JORNADAS!I" + j.rowIndex + ":I" + j.rowIndex;
+  const range = `JORNADAS!I${j.rowIndex}:I${j.rowIndex}`;
   await updateSheetValues(range, [[ahora]]);
 }
 
 async function actualizarSalidaFoto(jornada_id, fotoUrl) {
   const j = await findJornadaById(jornada_id);
   if (!j) return;
-  const range = "JORNADAS!L" + j.rowIndex + ":L" + j.rowIndex;
+  const range = `JORNADAS!L${j.rowIndex}:L${j.rowIndex}`;
   await updateSheetValues(range, [[fotoUrl]]);
 }
 
 async function actualizarSalidaUbicacionYCerrar(jornada_id, lat, lon) {
   const j = await findJornadaById(jornada_id);
   if (!j) return;
-  const rangePos = "JORNADAS!J" + j.rowIndex + ":K" + j.rowIndex;
+  const rangePos = `JORNADAS!J${j.rowIndex}:K${j.rowIndex}`;
   await updateSheetValues(rangePos, [[lat, lon]]);
-  const rangeEstado = "JORNADAS!M" + j.rowIndex + ":M" + j.rowIndex;
+  const rangeEstado = `JORNADAS!M${j.rowIndex}:M${j.rowIndex}`;
   await updateSheetValues(rangeEstado, [["CERRADA"]]);
 }
 
@@ -645,7 +943,8 @@ function demoAnalisisPorTipo(tipo_evento) {
       };
     case "SALIDA_COMIDA":
       return {
-        resultado_ai: "Salida a comer registrada (demo). Fondo de pasillo / salida.",
+        resultado_ai:
+          "Salida a comer registrada (demo). Fondo de pasillo / salida.",
         score_confianza: 0.9,
         riesgo: "BAJO",
       };
@@ -657,7 +956,8 @@ function demoAnalisisPorTipo(tipo_evento) {
       };
     case "FOTO_EXHIBICION":
       return {
-        resultado_ai: "Exhibición secundaria detectada, producto frontal visible (demo).",
+        resultado_ai:
+          "Exhibición secundaria detectada, producto frontal visible (demo).",
         score_confianza: 0.93,
         riesgo: "BAJO",
       };
@@ -676,19 +976,20 @@ function demoAnalisisPorTipo(tipo_evento) {
   }
 }
 
-async function registrarEvidencia(opts) {
-  const telefono = opts.telefono;
-  const tipo_evento = opts.tipo_evento;
-  const origen = opts.origen || "";
-  const jornada_id = opts.jornada_id || "";
-  const visita_id = opts.visita_id || "";
-  const fotoUrl = opts.fotoUrl || "";
-  const lat = opts.lat || "";
-  const lon = opts.lon || "";
-
+async function registrarEvidencia({
+  telefono,
+  tipo_evento,
+  origen,
+  jornada_id = "",
+  visita_id = "",
+  fotoUrl = "",
+  lat = "",
+  lon = "",
+}) {
   const evidencia_id = "EV-" + Date.now();
   const fecha_hora = new Date().toISOString();
-  const demo = demoAnalisisPorTipo(tipo_evento);
+  const { resultado_ai, score_confianza, riesgo } =
+    demoAnalisisPorTipo(tipo_evento);
 
   await appendSheetValues("EVIDENCIAS!A2:M", [
     [
@@ -702,22 +1003,17 @@ async function registrarEvidencia(opts) {
       fotoUrl,
       lat,
       lon,
-      demo.resultado_ai,
-      demo.score_confianza,
-      demo.riesgo,
+      resultado_ai,
+      score_confianza,
+      riesgo,
     ],
   ]);
 
-  return {
-    evidencia_id,
-    resultado_ai: demo.resultado_ai,
-    score_confianza: demo.score_confianza,
-    riesgo: demo.riesgo,
-  };
+  return { evidencia_id, resultado_ai, score_confianza, riesgo };
 }
 
 // ==========================
-// Menús
+// Menú principal
 // ==========================
 function buildMenuPrincipal() {
   return (
@@ -732,18 +1028,88 @@ function buildMenuPrincipal() {
   );
 }
 
-function buildSupervisorMenu(supervisor) {
-  const nombre = supervisor && supervisor.nombre ? supervisor.nombre : "Supervisor";
-  return (
-    "👋 Hola, *" +
-    nombre +
-    "* (Supervisor).\n\n" +
-    "¿Qué quieres hacer hoy?\n" +
-    "1️⃣ Ver evidencias de *hoy* por promotor\n" +
-    "2️⃣ Ver evidencias de *hoy* con riesgo MEDIO/ALTO 🧠📸\n" +
-    "3️⃣ Ver menú estándar de promotor (demo)\n\n" +
-    "Escribe el número de la opción o *menu* en cualquier momento."
-  );
+// ==========================
+// Lógica principal
+// ==========================
+async function handleIncoming(telefono, body, inbound) {
+  const text = (body || "").trim();
+  const lower = text.toLowerCase();
+
+  // Comando global puntos
+  if (lower === "puntos") {
+    const { operacion, capacitacion, total } = await getResumenPuntos(telefono);
+    return (
+      "📊 *Tus puntos actuales*\n" +
+      `🟦 Operación: ${operacion}\n` +
+      `🟨 Capacitación: ${capacitacion}\n` +
+      `🎯 Total: ${total}\n\n` +
+      "Escribe *menu* para volver al inicio."
+    );
+  }
+
+  // Comando global menu
+  if (lower === "menu" || lower === "inicio") {
+    await setSession(telefono, STATE_MENU, {});
+    return buildMenuPrincipal();
+  }
+
+  // 🔍 ¿Es supervisor?
+  const supervisor = await getSupervisorPorTelefono(telefono);
+  const esSupervisor = !!supervisor;
+
+  // Atajo global: menú de supervisor
+  if (esSupervisor && (lower === "sup" || lower === "supervisor")) {
+    await setSession(telefono, STATE_SUP_MENU, {});
+    return buildSupervisorMenu(supervisor);
+  }
+
+  const sesion = await getSession(telefono);
+  const estado = sesion.estado_actual;
+  const data = sesion.data_json || {};
+
+  switch (estado) {
+    // 🧑‍💼 Estados de SUPERVISOR
+    case STATE_SUP_MENU:
+    case STATE_SUP_PROMOTOR_LIST:
+    case STATE_SUP_FOTOS_LIST:
+    case STATE_SUP_ELEGIR_GRUPO:
+      return await handleSupervisor(
+        telefono,
+        supervisor,
+        estado,
+        text,
+        data,
+        inbound
+      );
+
+    case STATE_MENU:
+      return await handleMenuPrincipal(telefono, text, inbound);
+
+    case STATE_DIA_MENU:
+    case STATE_JORNADA_FOTO_SUBEVENTO:
+    case STATE_JORNADA_UBICACION_SUBEVENTO:
+      return await handleDia(telefono, estado, text, data, inbound);
+
+    case STATE_OPER_MENU:
+    case STATE_OPER_ELEGIR_TIENDA:
+    case STATE_OPER_VISITA_MENU:
+    case STATE_OPER_INV_PROD:
+    case STATE_OPER_COMP_COMPETIDOR:
+    case STATE_OPER_COMP_ACTIVIDAD:
+    case STATE_OPER_VENTA:
+      return await handleOperacion(telefono, estado, text, data);
+
+    case STATE_ACAD_MENU:
+    case STATE_ACAD_RETO:
+      return await handleAcademia(telefono, estado, text, data);
+
+    case STATE_EVIDENCIA_FOTO:
+      return await handleEvidenciaDirecta(telefono, estado, text, data, inbound);
+
+    default:
+      await setSession(telefono, STATE_MENU, {});
+      return "Reinicié tu sesión 🔄.\n\n" + buildMenuPrincipal();
+  }
 }
 
 // ==========================
@@ -809,12 +1175,12 @@ async function handleMenuPrincipal(telefono, text, inbound) {
 
   // 5) Ver mis puntos
   if (text === "5") {
-    const resumen = await getResumenPuntos(telefono);
+    const { operacion, capacitacion, total } = await getResumenPuntos(telefono);
     return (
       "📊 *Tus puntos actuales*\n" +
-      "🟦 Operación: " + resumen.operacion + "\n" +
-      "🟨 Capacitación: " + resumen.capacitacion + "\n" +
-      "🎯 Total: " + resumen.total + "\n\n" +
+      `🟦 Operación: ${operacion}\n` +
+      `🟨 Capacitación: ${capacitacion}\n` +
+      `🎯 Total: ${total}\n\n` +
       "Escribe *menu* para volver al inicio."
     );
   }
@@ -826,14 +1192,14 @@ async function handleMenuPrincipal(telefono, text, inbound) {
 // 1) Mi día de trabajo
 // ==========================
 async function handleDia(telefono, estado, text, data, inbound) {
-  const numMedia = parseInt(inbound && inbound.NumMedia ? inbound.NumMedia : "0", 10);
-  const mediaUrl0 = inbound && inbound.MediaUrl0 ? inbound.MediaUrl0 : "";
-  const lat = inbound && (inbound.Latitude || inbound.Latitude0) ? (inbound.Latitude || inbound.Latitude0) : "";
-  const lon = inbound && (inbound.Longitude || inbound.Longitude0) ? (inbound.Longitude || inbound.Longitude0) : "";
+  const numMedia = parseInt(inbound?.NumMedia || "0", 10);
+  const mediaUrl0 = inbound?.MediaUrl0 || "";
+  const lat = inbound?.Latitude || inbound?.Latitude0 || "";
+  const lon = inbound?.Longitude || inbound?.Longitude0 || "";
 
   const jornada = await getJornadaAbiertaPorTelefono(telefono);
 
-  // MENÚ "MI DÍA"
+  // ====== MENÚ "MI DÍA" ======
   if (estado === STATE_DIA_MENU) {
     if (!jornada) {
       // No hay jornada abierta
@@ -844,7 +1210,7 @@ async function handleDia(telefono, estado, text, data, inbound) {
           promotor ? promotor.promotor_id : ""
         );
         await setSession(telefono, STATE_JORNADA_FOTO_SUBEVENTO, {
-          jornada_id: jornada_id,
+          jornada_id,
           subtipo: "ENTRADA_DIA",
         });
         return (
@@ -867,6 +1233,7 @@ async function handleDia(telefono, estado, text, data, inbound) {
     } else {
       // Jornada abierta
       if (text === "1") {
+        // Salida a comer
         await setSession(telefono, STATE_JORNADA_FOTO_SUBEVENTO, {
           jornada_id: jornada.jornada_id,
           subtipo: "SALIDA_COMIDA",
@@ -877,6 +1244,7 @@ async function handleDia(telefono, estado, text, data, inbound) {
         );
       }
       if (text === "2") {
+        // Regreso de comida
         await setSession(telefono, STATE_JORNADA_FOTO_SUBEVENTO, {
           jornada_id: jornada.jornada_id,
           subtipo: "REGRESO_COMIDA",
@@ -887,6 +1255,7 @@ async function handleDia(telefono, estado, text, data, inbound) {
         );
       }
       if (text === "3") {
+        // Salida del día
         await registrarSalidaHora(jornada.jornada_id);
         await setSession(telefono, STATE_JORNADA_FOTO_SUBEVENTO, {
           jornada_id: jornada.jornada_id,
@@ -904,33 +1273,19 @@ async function handleDia(telefono, estado, text, data, inbound) {
         const salidaStr = jornada.hora_salida || "";
         const salidaLocal = salidaStr ? salidaStr.substring(11, 16) : "Pendiente";
 
-        let msg =
+        return (
           "📋 *Detalle de tu jornada de hoy*\n" +
-          "📅 Fecha: *" +
-          (fecha || "(sin fecha)") +
-          "*\n";
-        if (horaLocal) {
-          msg += "🕒 Entrada: *" + horaLocal + "*\n";
-        }
-        msg += "🚪 Salida: *" + salidaLocal + "*\n";
-        if (jornada.lat_entrada && jornada.lon_entrada) {
-          msg +=
-            "📍 Entrada: lat " +
-            jornada.lat_entrada +
-            ", lon " +
-            jornada.lon_entrada +
-            "\n";
-        }
-        if (jornada.lat_salida && jornada.lon_salida) {
-          msg +=
-            "📍 Salida: lat " +
-            jornada.lat_salida +
-            ", lon " +
-            jornada.lon_salida +
-            "\n";
-        }
-        msg += "\nEscribe *menu* para volver al inicio.";
-        return msg;
+          `📅 Fecha: *${fecha || "(sin fecha)"}*\n` +
+          (horaLocal ? `🕒 Entrada: *${horaLocal}*\n` : "") +
+          `🚪 Salida: *${salidaLocal}*\n` +
+          (jornada.lat_entrada && jornada.lon_entrada
+            ? `📍 Entrada: lat ${jornada.lat_entrada}, lon ${jornada.lon_entrada}\n`
+            : "") +
+          (jornada.lat_salida && jornada.lon_salida
+            ? `📍 Salida: lat ${jornada.lat_salida}, lon ${jornada.lon_salida}\n`
+            : "") +
+          "\nEscribe *menu* para volver al inicio."
+        );
       }
       if (text === "5") {
         await setSession(telefono, STATE_MENU, {});
@@ -949,7 +1304,7 @@ async function handleDia(telefono, estado, text, data, inbound) {
     }
   }
 
-  // SUBEVENTOS: FOTO
+  // ====== SUBEVENTOS: FOTO ======
   if (estado === STATE_JORNADA_FOTO_SUBEVENTO) {
     if (!numMedia || numMedia < 1 || !mediaUrl0) {
       return (
@@ -958,9 +1313,8 @@ async function handleDia(telefono, estado, text, data, inbound) {
       );
     }
 
-    const jornada_id = data.jornada_id;
-    const subtipo = data.subtipo;
-
+    const { jornada_id, subtipo } = data;
+    // Para entrada y salida del día, guardamos la foto en JORNADAS
     if (subtipo === "ENTRADA_DIA") {
       await actualizarEntradaFoto(jornada_id, mediaUrl0);
     } else if (subtipo === "SALIDA_DIA") {
@@ -968,8 +1322,8 @@ async function handleDia(telefono, estado, text, data, inbound) {
     }
 
     await setSession(telefono, STATE_JORNADA_UBICACION_SUBEVENTO, {
-      jornada_id: jornada_id,
-      subtipo: subtipo,
+      jornada_id,
+      subtipo,
       fotoUrl: mediaUrl0,
     });
 
@@ -979,30 +1333,29 @@ async function handleDia(telefono, estado, text, data, inbound) {
     );
   }
 
-  // SUBEVENTOS: UBICACIÓN + EVIDENCIA
+  // ====== SUBEVENTOS: UBICACIÓN + EVIDENCIA ======
   if (estado === STATE_JORNADA_UBICACION_SUBEVENTO) {
-    const jornada_id = data.jornada_id;
-    const subtipo = data.subtipo;
-    const fotoUrl = data.fotoUrl;
+    const { jornada_id, subtipo, fotoUrl } = data;
     const latUse = lat || "";
     const lonUse = lon || "";
 
+    // Entrada del día
     if (subtipo === "ENTRADA_DIA") {
       await actualizarEntradaUbicacion(jornada_id, latUse, lonUse);
       await registrarEvidencia({
-        telefono: telefono,
+        telefono,
         tipo_evento: "ENTRADA_DIA",
         origen: "JORNADA",
-        jornada_id: jornada_id,
+        jornada_id,
         visita_id: "",
-        fotoUrl: fotoUrl,
+        fotoUrl,
         lat: latUse,
         lon: lonUse,
       });
       await addPuntos(
         telefono,
         "OPERACION",
-        "ENTRADA_JORNADA_" + jornada_id,
+        `ENTRADA_JORNADA_${jornada_id}`,
         3
       );
       await setSession(telefono, STATE_DIA_MENU, {});
@@ -1013,22 +1366,23 @@ async function handleDia(telefono, estado, text, data, inbound) {
       );
     }
 
+    // Salida del día
     if (subtipo === "SALIDA_DIA") {
       await actualizarSalidaUbicacionYCerrar(jornada_id, latUse, lonUse);
       await registrarEvidencia({
-        telefono: telefono,
+        telefono,
         tipo_evento: "SALIDA_DIA",
         origen: "JORNADA",
-        jornada_id: jornada_id,
+        jornada_id,
         visita_id: "",
-        fotoUrl: fotoUrl,
+        fotoUrl,
         lat: latUse,
         lon: lonUse,
       });
       await addPuntos(
         telefono,
         "OPERACION",
-        "SALIDA_JORNADA_" + jornada_id,
+        `SALIDA_JORNADA_${jornada_id}`,
         3
       );
       await setSession(telefono, STATE_DIA_MENU, {});
@@ -1039,21 +1393,22 @@ async function handleDia(telefono, estado, text, data, inbound) {
       );
     }
 
+    // Salida a comer
     if (subtipo === "SALIDA_COMIDA") {
       await registrarEvidencia({
-        telefono: telefono,
+        telefono,
         tipo_evento: "SALIDA_COMIDA",
         origen: "JORNADA",
-        jornada_id: jornada_id,
+        jornada_id,
         visita_id: "",
-        fotoUrl: fotoUrl,
+        fotoUrl,
         lat: latUse,
         lon: lonUse,
       });
       await addPuntos(
         telefono,
         "OPERACION",
-        "SALIDA_COMIDA_" + jornada_id,
+        `SALIDA_COMIDA_${jornada_id}`,
         2
       );
       await setSession(telefono, STATE_DIA_MENU, {});
@@ -1064,21 +1419,22 @@ async function handleDia(telefono, estado, text, data, inbound) {
       );
     }
 
+    // Regreso de comida
     if (subtipo === "REGRESO_COMIDA") {
       await registrarEvidencia({
-        telefono: telefono,
+        telefono,
         tipo_evento: "REGRESO_COMIDA",
         origen: "JORNADA",
-        jornada_id: jornada_id,
+        jornada_id,
         visita_id: "",
-        fotoUrl: fotoUrl,
+        fotoUrl,
         lat: latUse,
         lon: lonUse,
       });
       await addPuntos(
         telefono,
         "OPERACION",
-        "REGRESO_COMIDA_" + jornada_id,
+        `REGRESO_COMIDA_${jornada_id}`,
         2
       );
       await setSession(telefono, STATE_DIA_MENU, {});
@@ -1105,6 +1461,7 @@ async function handleDia(telefono, estado, text, data, inbound) {
 // 2) Operación en tienda
 // ==========================
 async function handleOperacion(telefono, estado, text, data) {
+  // ----- Menú Operación -----
   if (estado === STATE_OPER_MENU) {
     if (text === "1") {
       const promotor = await getPromotorPorTelefono(telefono);
@@ -1119,21 +1476,13 @@ async function handleOperacion(telefono, estado, text, data) {
       }
 
       await setSession(telefono, STATE_OPER_ELEGIR_TIENDA, {
-        tiendas: tiendas,
+        tiendas,
         promotor_id: promotor ? promotor.promotor_id : "",
       });
 
       let msg = "🏪 *¿En qué tienda estás hoy?*\n";
-      tiendas.forEach(function (t, idx) {
-        msg +=
-          (idx + 1) +
-          ") " +
-          t.nombre_tienda +
-          " – " +
-          t.cadena +
-          " (" +
-          t.ciudad +
-          ")\n";
+      tiendas.forEach((t, idx) => {
+        msg += `${idx + 1}) ${t.nombre_tienda} – ${t.cadena} (${t.ciudad})\n`;
       });
       msg += "\nResponde con el número de la tienda.";
       return msg;
@@ -1161,21 +1510,14 @@ async function handleOperacion(telefono, estado, text, data) {
     );
   }
 
+  // ----- Elegir tienda -----
   if (estado === STATE_OPER_ELEGIR_TIENDA) {
     const tiendas = data.tiendas || [];
     const n = parseInt(text, 10);
     if (Number.isNaN(n) || n < 1 || n > tiendas.length) {
       let msg = "Por favor elige una opción válida:\n\n";
-      tiendas.forEach(function (t, idx) {
-        msg +=
-          (idx + 1) +
-          ") " +
-          t.nombre_tienda +
-          " – " +
-          t.cadena +
-          " (" +
-          t.ciudad +
-          ")\n";
+      tiendas.forEach((t, idx) => {
+        msg += `${idx + 1}) ${t.nombre_tienda} – ${t.cadena} (${t.ciudad})\n`;
       });
       msg += "\nResponde con el número de la tienda.";
       return msg;
@@ -1193,19 +1535,15 @@ async function handleOperacion(telefono, estado, text, data) {
     ]);
 
     await setSession(telefono, STATE_OPER_VISITA_MENU, {
-      visitaId: visitaId,
-      promotor_id: promotor_id,
+      visitaId,
+      promotor_id,
       tienda_id: tienda.tienda_id,
       tienda_nombre: tienda.nombre_tienda,
       tienda_ciudad: tienda.ciudad,
     });
 
     return (
-      "📝 *Visita iniciada* en *" +
-      tienda.nombre_tienda +
-      "* (" +
-      tienda.ciudad +
-      ").\n\n" +
+      `📝 *Visita iniciada* en *${tienda.nombre_tienda}* (${tienda.ciudad}).\n\n` +
       "1️⃣ Inventario de productos foco\n" +
       "2️⃣ Actividad de la competencia\n" +
       "3️⃣ Foto de exhibición (EVIDENCIA+ demo)\n" +
@@ -1213,6 +1551,7 @@ async function handleOperacion(telefono, estado, text, data) {
     );
   }
 
+  // ----- Menú dentro de visita -----
   if (estado === STATE_OPER_VISITA_MENU) {
     if (text === "1") {
       const productos = await getProductosFoco();
@@ -1229,7 +1568,7 @@ async function handleOperacion(telefono, estado, text, data) {
         promotor_id: data.promotor_id || "",
         tienda_id: data.tienda_id,
         tienda_nombre: data.tienda_nombre,
-        productos: productos,
+        productos,
         idx: 0,
         contestados: 0,
       });
@@ -1237,12 +1576,8 @@ async function handleOperacion(telefono, estado, text, data) {
       const p = productos[0];
       return (
         "📦 *Inventario de productos foco*\n\n" +
-        "Producto 1 de " +
-        productos.length +
-        ":\n" +
-        "*" +
-        p.nombre_producto +
-        "*\n\n" +
+        `Producto 1 de ${productos.length}:\n` +
+        `*${p.nombre_producto}*\n\n` +
         "¿Cuántas piezas ves en anaquel?\n" +
         "Responde con un número o *s* para saltar."
       );
@@ -1251,19 +1586,10 @@ async function handleOperacion(telefono, estado, text, data) {
     if (text === "2") {
       const competidores = await getCompetidoresCatalogo();
       if (!competidores.length) {
-        await setSession(telefono, STATE_OPER_VISITA_MENU, {
-          visitaId: data.visitaId,
-          promotor_id: data.promotor_id,
-          tienda_id: data.tienda_id,
-          tienda_nombre: data.tienda_nombre,
-        });
         return (
           "No hay actividades de competencia configuradas en *ACTIVIDADES_COMPETENCIA* ⚔️\n" +
           "Configúralas y vuelve a intentar.\n\n" +
-          "1️⃣ Inventario\n" +
-          "2️⃣ Actividad de la competencia\n" +
-          "3️⃣ Foto de exhibición\n" +
-          "4️⃣ Cerrar visita"
+          "Escribe *menu* para volver al inicio."
         );
       }
 
@@ -1272,19 +1598,20 @@ async function handleOperacion(telefono, estado, text, data) {
         promotor_id: data.promotor_id || "",
         tienda_id: data.tienda_id,
         tienda_nombre: data.tienda_nombre,
-        competidores: competidores,
+        competidores,
       });
 
       let msg = "⚔️ *Competencia en piso de venta*\n\n";
       msg += "¿De qué competidor quieres registrar actividad?\n";
-      competidores.forEach(function (c, idx) {
-        msg += (idx + 1) + ") " + c + "\n";
+      competidores.forEach((c, idx) => {
+        msg += `${idx + 1}) ${c}\n`;
       });
       msg += "\nResponde con el número del competidor.";
       return msg;
     }
 
     if (text === "3") {
+      // Foto de exhibición directa → EVIDENCIAS
       await setSession(telefono, STATE_EVIDENCIA_FOTO, {
         modo: "FOTO_EXHIBICION",
         visitaId: data.visitaId,
@@ -1293,25 +1620,25 @@ async function handleOperacion(telefono, estado, text, data) {
     }
 
     if (text === "4") {
-      const visitaId2 = data.visitaId;
+      const visitaId = data.visitaId;
       const rows = await getSheetValues("VISITAS!A2:G");
       let rowIndex = null;
       for (let i = 0; i < rows.length; i++) {
-        if (rows[i][0] === visitaId2) {
+        if (rows[i][0] === visitaId) {
           rowIndex = i + 2;
           break;
         }
       }
       if (rowIndex !== null) {
-        const now2 = new Date().toISOString();
-        const range = "VISITAS!F" + rowIndex + ":F" + rowIndex;
-        await updateSheetValues(range, [[now2]]);
+        const now = new Date().toISOString();
+        const range = `VISITAS!F${rowIndex}:F${rowIndex}`;
+        await updateSheetValues(range, [[now]]);
       }
 
       await addPuntos(
         telefono,
         "OPERACION",
-        "CIERRE_VISITA_" + visitaId2,
+        `CIERRE_VISITA_${visitaId}`,
         5
       );
       await setSession(telefono, STATE_OPER_MENU, {});
@@ -1333,6 +1660,7 @@ async function handleOperacion(telefono, estado, text, data) {
     );
   }
 
+  // ----- Inventario -----
   if (estado === STATE_OPER_INV_PROD) {
     const productos = data.productos || [];
     let idx = data.idx || 0;
@@ -1365,15 +1693,14 @@ async function handleOperacion(telefono, estado, text, data) {
       if (Number.isNaN(cantidad) || cantidad < 0) {
         const p = productos[idx];
         return (
-          "Escribe un número válido para *" +
-          p.nombre_producto +
-          "* o *s* para saltar."
+          `Escribe un número válido para *${p.nombre_producto}* ` +
+          "o *s* para saltar."
         );
       }
       grabar = true;
     }
 
-    const p2 = productos[idx];
+    const p = productos[idx];
 
     if (grabar) {
       const fecha = new Date().toISOString().slice(0, 10);
@@ -1382,7 +1709,7 @@ async function handleOperacion(telefono, estado, text, data) {
           data.visitaId,
           data.promotor_id || "",
           data.tienda_id,
-          p2.producto_id,
+          p.producto_id,
           cantidad,
           fecha,
         ],
@@ -1397,7 +1724,7 @@ async function handleOperacion(telefono, estado, text, data) {
         await addPuntos(
           telefono,
           "OPERACION",
-          "INVENTARIO_VISITA_" + data.visitaId,
+          `INVENTARIO_VISITA_${data.visitaId}`,
           pts
         );
       }
@@ -1411,10 +1738,8 @@ async function handleOperacion(telefono, estado, text, data) {
 
       return (
         "✅ Inventario registrado.\n" +
-        "Productos respondidos: *" +
-        contestados +
-        "*.\n" +
-        (pts > 0 ? "🎯 Ganaste *" + pts + " puntos*.\n\n" : "\n") +
+        `Productos respondidos: *${contestados}*.\n` +
+        (pts > 0 ? `🎯 Ganaste *${pts} puntos*.\n\n` : "\n") +
         "1️⃣ Inventario de productos foco\n" +
         "2️⃣ Actividad de la competencia\n" +
         "3️⃣ Foto de exhibición\n" +
@@ -1427,34 +1752,29 @@ async function handleOperacion(telefono, estado, text, data) {
       promotor_id: data.promotor_id,
       tienda_id: data.tienda_id,
       tienda_nombre: data.tienda_nombre,
-      productos: productos,
-      idx: idx,
-      contestados: contestados,
+      productos,
+      idx,
+      contestados,
     });
 
     const siguiente = productos[idx];
     return (
       "📦 *Inventario de productos foco*\n\n" +
-      "Producto " +
-      (idx + 1) +
-      " de " +
-      productos.length +
-      ":\n" +
-      "*" +
-      siguiente.nombre_producto +
-      "*\n\n" +
+      `Producto ${idx + 1} de ${productos.length}:\n` +
+      `*${siguiente.nombre_producto}*\n\n` +
       "¿Cuántas piezas ves en anaquel?\n" +
       "Responde con un número o *s* para saltar."
     );
   }
 
+  // ----- Competencia: elegir competidor -----
   if (estado === STATE_OPER_COMP_COMPETIDOR) {
     const competidores = data.competidores || [];
     const n = parseInt(text, 10);
     if (Number.isNaN(n) || n < 1 || n > competidores.length) {
       let msg = "Elige una opción válida:\n\n";
-      competidores.forEach(function (c, idx) {
-        msg += (idx + 1) + ") " + c + "\n";
+      competidores.forEach((c, idx) => {
+        msg += `${idx + 1}) ${c}\n`;
       });
       msg += "\nResponde con el número del competidor.";
       return msg;
@@ -1470,9 +1790,7 @@ async function handleOperacion(telefono, estado, text, data) {
         tienda_nombre: data.tienda_nombre,
       });
       return (
-        "No hay actividades configuradas para *" +
-        competidor +
-        "* ⚔️\n\n" +
+        `No hay actividades configuradas para *${competidor}* ⚔️\n\n` +
         "1️⃣ Inventario\n" +
         "2️⃣ Actividad de la competencia\n" +
         "3️⃣ Foto de exhibición\n" +
@@ -1485,37 +1803,26 @@ async function handleOperacion(telefono, estado, text, data) {
       promotor_id: data.promotor_id,
       tienda_id: data.tienda_id,
       tienda_nombre: data.tienda_nombre,
-      competidor: competidor,
-      actividades: actividades,
+      competidor,
+      actividades,
     });
 
-    let msg2 = "⚔️ *Actividades de " + competidor + "*\n\n";
-    actividades.forEach(function (a, idx) {
-      msg2 +=
-        (idx + 1) +
-        ") " +
-        a.tipo_actividad +
-        " – " +
-        a.descripcion_corta +
-        "\n";
+    let msg = `⚔️ *Actividades de ${competidor}*\n\n`;
+    actividades.forEach((a, idx) => {
+      msg += `${idx + 1}) ${a.tipo_actividad} – ${a.descripcion_corta}\n`;
     });
-    msg2 += "\nResponde con el número de la actividad que viste.";
-    return msg2;
+    msg += "\nResponde con el número de la actividad que viste.";
+    return msg;
   }
 
+  // ----- Competencia: elegir actividad -----
   if (estado === STATE_OPER_COMP_ACTIVIDAD) {
     const actividades = data.actividades || [];
     const n = parseInt(text, 10);
     if (Number.isNaN(n) || n < 1 || n > actividades.length) {
-      let msg = "Elige una opción válida de *" + data.competidor + "*:\n\n";
-      actividades.forEach(function (a, idx) {
-        msg +=
-          (idx + 1) +
-          ") " +
-          a.tipo_actividad +
-          " – " +
-          a.descripcion_corta +
-          "\n";
+      let msg = `Elige una opción válida de *${data.competidor}*:\n\n`;
+      actividades.forEach((a, idx) => {
+        msg += `${idx + 1}) ${a.tipo_actividad} – ${a.descripcion_corta}\n`;
       });
       msg += "\nResponde con el número de la actividad.";
       return msg;
@@ -1527,7 +1834,7 @@ async function handleOperacion(telefono, estado, text, data) {
       await addPuntos(
         telefono,
         "OPERACION",
-        "COMPETENCIA_" + act.actividad_id + "_" + data.visitaId,
+        `COMPETENCIA_${act.actividad_id}_${data.visitaId}`,
         pts
       );
     }
@@ -1541,15 +1848,9 @@ async function handleOperacion(telefono, estado, text, data) {
 
     return (
       "✅ Actividad de competencia registrada.\n\n" +
-      "Competidor: *" +
-      act.competidor +
-      "*\n" +
-      "Actividad: *" +
-      act.tipo_actividad +
-      " – " +
-      act.descripcion_corta +
-      "*\n" +
-      (pts > 0 ? "🎯 Ganaste *" + pts + " puntos*.\n\n" : "\n") +
+      `Competidor: *${act.competidor}*\n` +
+      `Actividad: *${act.tipo_actividad} – ${act.descripcion_corta}*\n` +
+      (pts > 0 ? `🎯 Ganaste *${pts} puntos*.\n\n` : "\n") +
       "1️⃣ Inventario\n" +
       "2️⃣ Actividad de la competencia\n" +
       "3️⃣ Foto de exhibición\n" +
@@ -1557,6 +1858,7 @@ async function handleOperacion(telefono, estado, text, data) {
     );
   }
 
+  // ----- Venta rápida demo -----
   if (estado === STATE_OPER_VENTA) {
     const unidades = Number(text);
     if (Number.isNaN(unidades) || unidades < 0) {
@@ -1564,7 +1866,7 @@ async function handleOperacion(telefono, estado, text, data) {
     }
 
     const fecha = new Date().toISOString();
-    const productoId = "PROD_X";
+    const productoId = "PROD_X"; // demo
 
     await appendSheetValues("VENTAS!A2:D", [
       [fecha, telefono, productoId, unidades],
@@ -1576,9 +1878,7 @@ async function handleOperacion(telefono, estado, text, data) {
     return (
       "✅ Venta registrada.\n" +
       "Producto: *Modelo X 128GB*\n" +
-      "Unidades: *" +
-      unidades +
-      "*\n\n" +
+      `Unidades: *${unidades}*\n\n` +
       "🎯 Ganaste *10 puntos de operación*.\n" +
       "1️⃣ Iniciar visita en tienda\n" +
       "2️⃣ Registrar otra venta rápida\n" +
@@ -1605,45 +1905,27 @@ async function handleAcademia(telefono, estado, text, data) {
       if (!rows.length) {
         return "Por ahora no hay retos configurados. 📭";
       }
-      const reto = rows[0];
-      const reto_id = reto[0];
-      const pregunta = reto[1] || "";
-      const opcion_1 = reto[2] || "";
-      const opcion_2 = reto[3] || "";
-      const opcion_3 = reto[4] || "";
-
-      await setSession(telefono, STATE_ACAD_RETO, { reto_id: reto_id });
-
-      let msg =
+      const [reto_id, pregunta, opcion_1, opcion_2, opcion_3] = rows[0];
+      await setSession(telefono, STATE_ACAD_RETO, { reto_id });
+      return (
         "🎓 *Reto del día*\n\n" +
-        pregunta +
-        "\n\n" +
-        "1️⃣ " +
-        opcion_1 +
-        "\n" +
-        "2️⃣ " +
-        opcion_2 +
-        "\n" +
-        "3️⃣ " +
-        opcion_3 +
-        "\n\n" +
-        "Responde con 1, 2 o 3.";
-      return msg;
+        `${pregunta}\n\n` +
+        `1️⃣ ${opcion_1}\n` +
+        `2️⃣ ${opcion_2}\n` +
+        `3️⃣ ${opcion_3}\n\n` +
+        "Responde con 1, 2 o 3."
+      );
     }
 
     if (text === "2") {
-      const resumen = await getResumenPuntos(telefono);
+      const { operacion, capacitacion, total } = await getResumenPuntos(
+        telefono
+      );
       return (
         "📊 *Tus puntos de capacitación*\n" +
-        "🟨 Capacitación: " +
-        resumen.capacitacion +
-        "\n" +
-        "🟦 Operación (referencia): " +
-        resumen.operacion +
-        "\n" +
-        "🎯 Total: " +
-        resumen.total +
-        "\n\n" +
+        `🟨 Capacitación: ${capacitacion}\n` +
+        `🟦 Operación (referencia): ${operacion}\n` +
+        `🎯 Total: ${total}\n\n` +
         "Escribe *menu* para volver al inicio."
       );
     }
@@ -1662,32 +1944,35 @@ async function handleAcademia(telefono, estado, text, data) {
   }
 
   if (estado === STATE_ACAD_RETO) {
-    if (text !== "1" && text !== "2" && text !== "3") {
+    if (!["1", "2", "3"].includes(text)) {
       return "Responde solo con 1, 2 o 3 😉";
     }
 
-    const reto_id = data.reto_id;
+    const { reto_id } = data;
     const rows = await getSheetValues("RETOS!A2:H");
-    const retoRow = rows.find(function (r) {
-      return r[0] === reto_id;
-    });
+    const retoRow = rows.find((r) => r[0] === reto_id);
     if (!retoRow) {
       await setSession(telefono, STATE_ACAD_MENU, {});
       return "Ocurrió un problema con el reto. Intenta de nuevo más tarde 🙏";
     }
 
-    const pregunta = retoRow[1] || "";
-    const opcion_1 = retoRow[2] || "";
-    const opcion_2 = retoRow[3] || "";
-    const opcion_3 = retoRow[4] || "";
-    const opcion_correcta = retoRow[5];
-    const puntos_ok = Number(retoRow[6] || 0);
-    const puntos_error = Number(retoRow[7] || 0);
+    const [
+      _id,
+      pregunta,
+      opcion_1,
+      opcion_2,
+      opcion_3,
+      opcion_correcta,
+      puntos_ok,
+      puntos_error,
+    ] = retoRow;
 
     const correctaNum = Number(opcion_correcta);
     const respuestaNum = Number(text);
     const es_correcta = correctaNum === respuestaNum;
-    const pts = es_correcta ? puntos_ok : puntos_error;
+    const pts = es_correcta
+      ? Number(puntos_ok || 0)
+      : Number(puntos_error || 0);
 
     const fecha_hora = new Date().toISOString();
     await appendSheetValues("RESPUESTAS_RETOS!A2:F", [
@@ -1702,39 +1987,28 @@ async function handleAcademia(telefono, estado, text, data) {
     ]);
 
     if (pts !== 0) {
-      await addPuntos(telefono, "CAPACITACION", "RETO_" + reto_id, pts);
+      await addPuntos(telefono, "CAPACITACION", `RETO_${reto_id}`, pts);
     }
 
     await setSession(telefono, STATE_ACAD_MENU, {});
 
     const feedback = es_correcta
       ? "✅ ¡Correcto!"
-      : "❌ La respuesta correcta era la opción " + opcion_correcta + ".";
+      : `❌ La respuesta correcta era la opción ${opcion_correcta}.`;
 
-    let msg =
-      feedback +
-      "\n\n" +
-      "Pregunta: " +
-      pregunta +
-      "\n" +
-      "1) " +
-      opcion_1 +
-      "\n" +
-      "2) " +
-      opcion_2 +
-      "\n" +
-      "3) " +
-      opcion_3 +
-      "\n\n" +
-      "🎯 Ganaste *" +
-      pts +
-      " puntos de capacitación*.\n\n" +
+    return (
+      `${feedback}\n\n` +
+      `Pregunta: ${pregunta}\n` +
+      `1) ${opcion_1}\n` +
+      `2) ${opcion_2}\n` +
+      `3) ${opcion_3}\n\n` +
+      `🎯 Ganaste *${pts} puntos de capacitación*.\n\n` +
       "¿Qué quieres hacer ahora?\n" +
       "1️⃣ Reto del día\n" +
       "2️⃣ Ver mis puntos de capacitación\n" +
       "3️⃣ Volver al menú\n\n" +
-      "O escribe *menu* para ir al inicio.";
-    return msg;
+      "O escribe *menu* para ir al inicio."
+    );
   }
 
   await setSession(telefono, STATE_ACAD_MENU, {});
@@ -1750,10 +2024,10 @@ async function handleAcademia(telefono, estado, text, data) {
 // 4) Auditoría de fotos directa (EVIDENCIA+ demo)
 // ==========================
 async function handleEvidenciaDirecta(telefono, estado, text, data, inbound) {
-  const numMedia = parseInt(inbound && inbound.NumMedia ? inbound.NumMedia : "0", 10);
-  const mediaUrl0 = inbound && inbound.MediaUrl0 ? inbound.MediaUrl0 : "";
-  const lat = inbound && (inbound.Latitude || inbound.Latitude0) ? (inbound.Latitude || inbound.Latitude0) : "";
-  const lon = inbound && (inbound.Longitude || inbound.Longitude0) ? (inbound.Longitude || inbound.Longitude0) : "";
+  const numMedia = parseInt(inbound?.NumMedia || "0", 10);
+  const mediaUrl0 = inbound?.MediaUrl0 || "";
+  const lat = inbound?.Latitude || inbound?.Latitude0 || "";
+  const lon = inbound?.Longitude || inbound?.Longitude0 || "";
 
   if (!numMedia || numMedia < 1 || !mediaUrl0) {
     return (
@@ -1765,8 +2039,8 @@ async function handleEvidenciaDirecta(telefono, estado, text, data, inbound) {
   const modo = data.modo || "AUDITORIA_DIRECTA";
   let tipo_evento = "AUDITORIA_DIRECTA";
   let origen = "DIRECTO";
-  const visita_id = data.visitaId || "";
-  const jornada = await getJornadaAbiertaPorTelefono(telefono);
+  let visita_id = data.visitaId || "";
+  let jornada = await getJornadaAbiertaPorTelefono(telefono);
   const jornada_id = jornada ? jornada.jornada_id : "";
 
   if (modo === "FOTO_EXHIBICION") {
@@ -1774,539 +2048,29 @@ async function handleEvidenciaDirecta(telefono, estado, text, data, inbound) {
     origen = "VISITA";
   }
 
-  const resultado = await registrarEvidencia({
-    telefono: telefono,
-    tipo_evento: tipo_evento,
-    origen: origen,
-    jornada_id: jornada_id,
-    visita_id: visita_id,
+  const { resultado_ai, score_confianza, riesgo } = await registrarEvidencia({
+    telefono,
+    tipo_evento,
+    origen,
+    jornada_id,
+    visita_id,
     fotoUrl: mediaUrl0,
-    lat: lat,
-    lon: lon,
+    lat,
+    lon,
   });
 
-  await addPuntos(
-    telefono,
-    "OPERACION",
-    "EVIDENCIA_" + tipo_evento,
-    3
-  );
+  await addPuntos(telefono, "OPERACION", `EVIDENCIA_${tipo_evento}`, 3);
 
   await setSession(telefono, STATE_MENU, {});
 
   return (
     "🔎 *Resultado EVIDENCIA+ (demo)*\n" +
-    "✔️ Análisis: " +
-    resultado.resultado_ai +
-    "\n" +
-    "📊 Confianza: " +
-    Math.round(resultado.score_confianza * 100) +
-    "%\n" +
-    "⚠️ Riesgo: " +
-    resultado.riesgo +
-    "\n\n" +
+    `✔️ Análisis: ${resultado_ai}\n` +
+    `📊 Confianza: ${(score_confianza * 100).toFixed(0)}%\n` +
+    `⚠️ Riesgo: ${riesgo}\n\n` +
     "🎯 Ganaste *3 puntos* por enviar esta evidencia.\n\n" +
     "Escribe *menu* para seguir usando el bot."
   );
-}
-
-// ===============================
-// Menú y flujo para SUPERVISOR
-// ===============================
-async function handleSupervisor(
-  telefonoSupervisor,
-  supervisor,
-  estado,
-  text,
-  data,
-  inbound
-) {
-  const lower = (text || "").trim().toLowerCase();
-
-  if (!supervisor) {
-    await setSession(telefonoSupervisor, STATE_MENU, {});
-    return (
-      "⚠️ Tu número ya no aparece como supervisor.\n" +
-      "Escribe *menu* para usar el bot como promotor."
-    );
-  }
-
-  if (estado === STATE_SUP_MENU) {
-    if (lower === "1" || lower === "1️⃣") {
-      const promotores = await getPromotoresDeSupervisor(telefonoSupervisor);
-      if (!promotores.length) {
-        return (
-          "⚠️ No hay promotores asociados a tu número en la hoja PROMOTORES.\n" +
-          "Verifica la columna *telefono_supervisor*."
-        );
-      }
-
-      const evidenciasHoy = await getEvidenciasHoy();
-      const conteos = {};
-      for (const ev of evidenciasHoy) {
-        conteos[ev.telefono] = (conteos[ev.telefono] || 0) + 1;
-      }
-
-      let msg = "👀 *Evidencias de hoy – tu equipo*\n\n";
-      promotores.forEach(function (p, idx) {
-        const cuenta = conteos[p.telefono] || 0;
-        msg += (idx + 1) + ") " + p.nombre + " – " + cuenta + " foto(s)\n";
-      });
-      msg +=
-        "\nResponde con el *número* del promotor para ver detalle,\n" +
-        "o escribe *menu* para volver.";
-
-      await setSession(telefonoSupervisor, STATE_SUP_PROMOTOR_LIST, {
-        promotores: promotores,
-      });
-      return msg;
-    }
-
-    if (lower === "2" || lower === "2️⃣") {
-      const promotores = await getPromotoresDeSupervisor(telefonoSupervisor);
-      if (!promotores.length) {
-        return (
-          "⚠️ No hay promotores asociados a tu número en la hoja PROMOTORES.\n" +
-          "Verifica la columna *telefono_supervisor*."
-        );
-      }
-
-      const telefonosEquipo = new Set(promotores.map(function (p) {
-        return p.telefono;
-      }));
-      const evidenciasHoy = await getEvidenciasHoy();
-
-      const mapTelNombre = {};
-      promotores.forEach(function (p) {
-        mapTelNombre[p.telefono] = p.nombre;
-      });
-
-      const filtradas = evidenciasHoy
-        .filter(function (ev) {
-          return (
-            telefonosEquipo.has(ev.telefono) &&
-            (ev.riesgo === "MEDIO" || ev.riesgo === "ALTO")
-          );
-        })
-        .map(function (ev) {
-          return {
-            evidencia_id: ev.evidencia_id,
-            telefono: ev.telefono,
-            fecha_hora: ev.fecha_hora,
-            tipo_evento: ev.tipo_evento,
-            origen: ev.origen,
-            jornada_id: ev.jornada_id,
-            visita_id: ev.visita_id,
-            url_foto: ev.url_foto,
-            lat: ev.lat,
-            lon: ev.lon,
-            resultado_ai: ev.resultado_ai,
-            score_confianza: ev.score_confianza,
-            riesgo: ev.riesgo,
-            promotor_nombre: mapTelNombre[ev.telefono] || ev.telefono,
-          };
-        });
-
-      if (!filtradas.length) {
-        return (
-          "🧠📸 Hoy no hay evidencias con riesgo MEDIO/ALTO para tu equipo.\n" +
-          "Escribe *menu* para otras opciones."
-        );
-      }
-
-      let msg2 = "🧠📸 *Evidencias de hoy con riesgo MEDIO/ALTO*\n\n";
-      filtradas.forEach(function (ev, idx) {
-        msg2 +=
-          (idx + 1) +
-          ") " +
-          ev.promotor_nombre +
-          " – " +
-          ev.tipo_evento +
-          " – riesgo " +
-          ev.riesgo +
-          "\n";
-      });
-      msg2 +=
-        "\nComandos:\n" +
-        "• `ver 2` → ver detalle y foto 2\n" +
-        "• `enviar 2` → reenviar solo la 2 al cliente\n" +
-        "• `enviar todas` → reenviar todas las de esta lista\n" +
-        "• `menu` → volver al menú supervisor";
-
-      await setSession(telefonoSupervisor, STATE_SUP_FOTOS_LIST, {
-        listado: filtradas,
-      });
-      return msg2;
-    }
-
-    if (lower === "3" || lower === "3️⃣") {
-      await setSession(telefonoSupervisor, STATE_MENU, {});
-      return (
-        "Has vuelto al menú estándar de promotor.\n" +
-        "Escribe *menu* para ver las opciones de promotor."
-      );
-    }
-
-    return buildSupervisorMenu(supervisor);
-  }
-
-  if (estado === STATE_SUP_PROMOTOR_LIST) {
-    if (lower === "menu" || lower === "inicio") {
-      await setSession(telefonoSupervisor, STATE_SUP_MENU, {});
-      return buildSupervisorMenu(supervisor);
-    }
-
-    const promotores = data.promotores || [];
-    const n = parseInt(text, 10);
-    if (Number.isNaN(n) || n < 1 || n > promotores.length) {
-      let msg = "Elige un *número* de promotor válido:\n\n";
-      promotores.forEach(function (p, idx) {
-        msg += (idx + 1) + ") " + p.nombre + "\n";
-      });
-      msg += "\nO escribe *menu* para volver.";
-      return msg;
-    }
-
-    const prom = promotores[n - 1];
-    const evidenciasHoy = await getEvidenciasHoy();
-    const listado = evidenciasHoy
-      .filter(function (ev) {
-        return ev.telefono === prom.telefono;
-      })
-      .map(function (ev) {
-        return {
-          evidencia_id: ev.evidencia_id,
-          telefono: ev.telefono,
-          fecha_hora: ev.fecha_hora,
-          tipo_evento: ev.tipo_evento,
-          origen: ev.origen,
-          jornada_id: ev.jornada_id,
-          visita_id: ev.visita_id,
-          url_foto: ev.url_foto,
-          lat: ev.lat,
-          lon: ev.lon,
-          resultado_ai: ev.resultado_ai,
-          score_confianza: ev.score_confianza,
-          riesgo: ev.riesgo,
-          promotor_nombre: prom.nombre,
-        };
-      });
-
-    if (!listado.length) {
-      await setSession(telefonoSupervisor, STATE_SUP_MENU, {});
-      return (
-        "⚠️ Hoy no hay evidencias registradas para *" +
-        prom.nombre +
-        "*.\n" +
-        "Escribe *menu* para volver al menú supervisor."
-      );
-    }
-
-    let msg3 = "📷 *Evidencias de hoy de " + prom.nombre + "*\n\n";
-    listado.forEach(function (ev, idx) {
-      msg3 +=
-        (idx + 1) + ") " + ev.tipo_evento + " – riesgo " + ev.riesgo + "\n";
-    });
-    msg3 +=
-      "\nComandos:\n" +
-      "• `ver 1` → ver detalle y foto 1\n" +
-      "• `enviar 1` → reenviar solo la 1 al cliente\n" +
-      "• `enviar todas` → reenviar todas las de esta lista\n" +
-      "• `menu` → volver";
-
-    await setSession(telefonoSupervisor, STATE_SUP_FOTOS_LIST, {
-      listado: listado,
-    });
-
-    return msg3;
-  }
-
-  if (estado === STATE_SUP_FOTOS_LIST) {
-    const listado = data.listado || [];
-
-    if (lower === "menu" || lower === "inicio") {
-      await setSession(telefonoSupervisor, STATE_SUP_MENU, {});
-      return buildSupervisorMenu(supervisor);
-    }
-
-    const verMatch = lower.match(/^ver\s+(\d+)/);
-    const enviarMatch = lower.match(/^enviar\s+(\d+)/);
-
-    if (verMatch) {
-      const idx = parseInt(verMatch[1], 10) - 1;
-      if (Number.isNaN(idx) || idx < 0 || idx >= listado.length) {
-        return (
-          "⚠️ Número inválido. Usa por ejemplo `ver 1`, `enviar 1` o `enviar todas`,\n" +
-          "o escribe *menu* para volver."
-        );
-      }
-      const ev = listado[idx];
-
-      let texto =
-        "🧾 *Detalle evidencia " +
-        (idx + 1) +
-        "*\n" +
-        (ev.promotor_nombre ? "👤 Promotor: " + ev.promotor_nombre + "\n" : "");
-      if (ev.fecha_hora) {
-        texto += "📅 Fecha: " + ev.fecha_hora + "\n";
-      }
-      texto += "🎯 Tipo: " + ev.tipo_evento + "\n";
-      texto +=
-        "🧠 EVIDENCIA+ (demo): " +
-        (ev.resultado_ai || "Evidencia registrada.") +
-        "\n";
-      texto += "⚠️ Riesgo: " + ev.riesgo + "\n\n";
-      texto +=
-        "Puedes escribir:\n" +
-        "• `enviar " +
-        (idx + 1) +
-        "` → reenviar esta foto al cliente\n" +
-        "• `enviar todas` → reenviar todas las de esta lista\n" +
-        "• `menu` → volver al menú supervisor";
-
-      return {
-        text: texto,
-        mediaUrl: ev.url_foto || null,
-      };
-    }
-
-    if (enviarMatch) {
-      const idx2 = parseInt(enviarMatch[1], 10) - 1;
-      if (Number.isNaN(idx2) || idx2 < 0 || idx2 >= listado.length) {
-        return (
-          "⚠️ Número inválido. Usa por ejemplo `enviar 1` o `enviar todas`,\n" +
-          "o escribe *menu* para volver."
-        );
-      }
-
-      const seleccionUna = [listado[idx2]];
-      const grupos = await getGruposClienteActivos();
-      if (!grupos.length) {
-        return (
-          "⚠️ No hay grupos de cliente activos en la hoja GRUPOS_CLIENTE.\n" +
-          "Configura al menos un grupo antes de usar esta opción."
-        );
-      }
-
-      let msg4 =
-        "📤 *Enviar evidencia al cliente*\n\n¿A qué grupo quieres enviarla?\n\n";
-      grupos.forEach(function (g, i) {
-        msg4 += (i + 1) + ") " + g.nombre_grupo;
-        if (g.cliente) msg4 += " – " + g.cliente;
-        msg4 += "\n";
-      });
-      msg4 +=
-        "\nResponde con el *número* del grupo o escribe *menu* para cancelar.";
-
-      await setSession(telefonoSupervisor, STATE_SUP_ELEGIR_GRUPO, {
-        seleccion: seleccionUna,
-        grupos: grupos,
-      });
-
-      return msg4;
-    }
-
-    if (lower === "enviar todas" || lower === "enviar todo") {
-      if (!listado.length) {
-        return (
-          "⚠️ No hay evidencias en esta lista.\n" +
-          "Escribe *menu* para volver al menú supervisor."
-        );
-      }
-
-      const grupos2 = await getGruposClienteActivos();
-      if (!grupos2.length) {
-        return (
-          "⚠️ No hay grupos de cliente activos en la hoja GRUPOS_CLIENTE.\n" +
-          "Configura al menos un grupo antes de usar esta opción."
-        );
-      }
-
-      let msg5 =
-        "📤 *Enviar TODAS las evidencias de esta lista al cliente*\n\n¿A qué grupo quieres enviarlas?\n\n";
-      grupos2.forEach(function (g, i) {
-        msg5 += (i + 1) + ") " + g.nombre_grupo;
-        if (g.cliente) msg5 += " – " + g.cliente;
-        msg5 += "\n";
-      });
-      msg5 +=
-        "\nResponde con el *número* del grupo o escribe *menu* para cancelar.";
-
-      await setSession(telefonoSupervisor, STATE_SUP_ELEGIR_GRUPO, {
-        seleccion: listado,
-        grupos: grupos2,
-      });
-
-      return msg5;
-    }
-
-    return (
-      "⚠️ No entendí tu respuesta.\n" +
-      "Usa por ejemplo `ver 1`, `enviar 1` o `enviar todas`,\n" +
-      "o escribe *menu* para volver."
-    );
-  }
-
-  if (estado === STATE_SUP_ELEGIR_GRUPO) {
-    const grupos = data.grupos || [];
-    const seleccion = data.seleccion || [];
-
-    if (lower === "menu" || lower === "cancelar" || lower === "no") {
-      await setSession(telefonoSupervisor, STATE_SUP_MENU, {});
-      return buildSupervisorMenu(supervisor);
-    }
-
-    const n = parseInt(text, 10);
-    if (Number.isNaN(n) || n < 1 || n > grupos.length) {
-      let msg = "⚠️ Número inválido. Elige uno de los siguientes grupos:\n\n";
-      grupos.forEach(function (g, i) {
-        msg += (i + 1) + ") " + g.nombre_grupo;
-        if (g.cliente) msg += " – " + g.cliente;
-        msg += "\n";
-      });
-      msg += "\nO escribe *menu* para cancelar.";
-      return msg;
-    }
-
-    const grupo = grupos[n - 1];
-
-    let totalMensajesOK = 0;
-    for (const ev of seleccion) {
-      try {
-        const resultado = await enviarFotoAGrupoCliente(ev, grupo);
-        if (resultado.ok) {
-          totalMensajesOK += 1;
-        }
-      } catch (err) {
-        console.error("Error enviando evidencia al cliente:", err);
-      }
-    }
-
-    await setSession(telefonoSupervisor, STATE_SUP_MENU, {});
-
-    if (!totalMensajesOK) {
-      return (
-        "⚠️ No se pudieron enviar las evidencias al cliente.\n" +
-        "Revisa que las variables de entorno de Twilio estén configuradas.\n\n" +
-        "Escribe *menu* para volver al menú supervisor."
-      );
-    }
-
-    return (
-      "✅ Evidencias enviadas al grupo *" +
-      grupo.nombre_grupo +
-      "*.\n" +
-      "Se procesaron *" +
-      seleccion.length +
-      "* evidencia(s).\n\n" +
-      "Escribe *menu* para volver al menú supervisor."
-    );
-  }
-
-  await setSession(telefonoSupervisor, STATE_SUP_MENU, {});
-  return buildSupervisorMenu(supervisor);
-}
-
-// ==========================
-// Lógica principal
-// ==========================
-async function handleIncoming(telefono, body, inbound) {
-  const text = (body || "").trim();
-  const lower = text.toLowerCase();
-
-  // Ver puntos
-  if (lower === "puntos") {
-    const resumen = await getResumenPuntos(telefono);
-    return (
-      "📊 *Tus puntos actuales*\n" +
-      "🟦 Operación: " +
-      resumen.operacion +
-      "\n" +
-      "🟨 Capacitación: " +
-      resumen.capacitacion +
-      "\n" +
-      "🎯 Total: " +
-      resumen.total +
-      "\n\n" +
-      "Escribe *menu* para volver al inicio."
-    );
-  }
-
-  const sesion = await getSession(telefono);
-  const estado = sesion.estado_actual;
-  const data = sesion.data_json || {};
-
-  const supervisor = await getSupervisorPorTelefono(telefono);
-  const esSupervisor = !!supervisor;
-
-  const estadosSupervisor = new Set([
-    STATE_SUP_MENU,
-    STATE_SUP_PROMOTOR_LIST,
-    STATE_SUP_FOTOS_LIST,
-    STATE_SUP_ELEGIR_GRUPO,
-  ]);
-  const enFlujoSupervisor = estadosSupervisor.has(estado);
-
-  if (esSupervisor && (lower === "sup" || lower === "supervisor")) {
-    await setSession(telefono, STATE_SUP_MENU, {});
-    return buildSupervisorMenu(supervisor);
-  }
-
-  if (lower === "menu" || lower === "inicio") {
-    if (esSupervisor && enFlujoSupervisor) {
-      await setSession(telefono, STATE_SUP_MENU, {});
-      return buildSupervisorMenu(supervisor);
-    }
-    await setSession(telefono, STATE_MENU, {});
-    return buildMenuPrincipal();
-  }
-
-  if (esSupervisor && enFlujoSupervisor) {
-    return await handleSupervisor(
-      telefono,
-      supervisor,
-      estado,
-      text,
-      data,
-      inbound
-    );
-  }
-
-  switch (estado) {
-    case STATE_MENU:
-      return await handleMenuPrincipal(telefono, text, inbound);
-
-    case STATE_DIA_MENU:
-    case STATE_JORNADA_FOTO_SUBEVENTO:
-    case STATE_JORNADA_UBICACION_SUBEVENTO:
-      return await handleDia(telefono, estado, text, data, inbound);
-
-    case STATE_OPER_MENU:
-    case STATE_OPER_ELEGIR_TIENDA:
-    case STATE_OPER_VISITA_MENU:
-    case STATE_OPER_INV_PROD:
-    case STATE_OPER_COMP_COMPETIDOR:
-    case STATE_OPER_COMP_ACTIVIDAD:
-    case STATE_OPER_VENTA:
-      return await handleOperacion(telefono, estado, text, data);
-
-    case STATE_ACAD_MENU:
-    case STATE_ACAD_RETO:
-      return await handleAcademia(telefono, estado, text, data);
-
-    case STATE_EVIDENCIA_FOTO:
-      return await handleEvidenciaDirecta(
-        telefono,
-        estado,
-        text,
-        data,
-        inbound
-      );
-
-    default:
-      await setSession(telefono, STATE_MENU, {});
-      return "Reinicié tu sesión 🔄.\n\n" + buildMenuPrincipal();
-  }
 }
 
 // ==========================
@@ -2316,13 +2080,7 @@ app.post("/whatsapp", async (req, res) => {
   const from = req.body.From;
   const body = (req.body.Body || "").trim();
 
-  console.log(
-    "Mensaje entrante:",
-    from,
-    body,
-    "NumMedia:",
-    req.body.NumMedia
-  );
+  console.log("Mensaje entrante:", from, body, "NumMedia:", req.body.NumMedia);
 
   let respuesta;
   try {
@@ -2336,22 +2094,23 @@ app.post("/whatsapp", async (req, res) => {
   const twiml = new MessagingResponse();
 
   if (typeof respuesta === "string") {
+    // Respuesta de texto normal
     twiml.message(respuesta);
   } else if (respuesta && typeof respuesta === "object") {
+    // Respuesta con posible media (ej. supervisor: ver 1)
     const msg = twiml.message(respuesta.text || "");
     if (respuesta.mediaUrl) {
       msg.media(respuesta.mediaUrl);
     }
   } else {
-    twiml.message(
-      "Ocurrió un problema al generar la respuesta. Intenta de nuevo más tarde 🙏"
-    );
+    twiml.message("No entendí la respuesta del bot 😅");
   }
 
   res.type("text/xml");
   res.send(twiml.toString());
 });
 
+// Ruta raíz para probar en navegador
 app.get("/", (req, res) => {
   res.send(
     "Promobolsillo+ demo está vivo ✅ (día + operación + academia + evidencias + supervisor)"
@@ -2359,5 +2118,5 @@ app.get("/", (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log("🚀 Promobolsillo+ demo escuchando en puerto " + PORT);
+  console.log(`🚀 Promobolsillo+ demo escuchando en puerto ${PORT}`);
 });
