@@ -21,12 +21,12 @@ const {
 const MEDIA_TTL = parseInt(MEDIA_PROXY_TTL_SECONDS || "3600", 10);
 
 // ==========================
-// App TZ (para que HOY sea CDMX, no UTC)
+// TZ (CDMX)
 // ==========================
 const APP_TZ = "America/Mexico_City";
 
 function ymdInTZ(date = new Date(), tz = APP_TZ) {
-  // 'sv-SE' -> YYYY-MM-DD
+  // 'sv-SE' => YYYY-MM-DD
   return new Intl.DateTimeFormat("sv-SE", {
     timeZone: tz,
     year: "numeric",
@@ -60,7 +60,7 @@ function nowISO() {
 }
 
 // ==========================
-// Twilio client (solo para enviar outbound / supervisor)
+// Twilio client (outbound)
 // ==========================
 let twilioClient = null;
 if (TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN) {
@@ -75,7 +75,7 @@ app.use(bodyParser.json());
 const MessagingResponse = twilio.twiml.MessagingResponse;
 
 // ==========================
-// LOCK por usuario (evita conteos raros por concurrencia)
+// LOCK por usuario (evita concurrencia)
 // ==========================
 const userLocks = new Map();
 async function withUserLock(key, fn) {
@@ -174,6 +174,7 @@ function signMedia(u, exp) {
   h.update(`${u}|${exp}`);
   return h.digest("hex");
 }
+
 function proxifyMediaUrl(baseUrl, originalUrl) {
   if (!originalUrl) return "";
   const exp = Math.floor(Date.now() / 1000) + MEDIA_TTL;
@@ -226,7 +227,7 @@ const STATE_ASIS_ACTIVA_MENU = "ASIS_ACTIVA_MENU";
 const STATE_ASIS_FOTO = "ASIS_FOTO";
 const STATE_ASIS_UBI = "ASIS_UBI";
 const STATE_ASIS_HIST = "ASIS_HIST";
-const STATE_ASIS_CAMBIAR_FOTO = "ASIS_CAMBIAR_FOTO"; // paso FOTO -> UBI
+const STATE_ASIS_CAMBIAR_FOTO = "ASIS_CAMBIAR_FOTO";
 
 // Evidencias
 const STATE_EVID_PICK_VISITA = "EVID_PICK_VISITA";
@@ -239,14 +240,14 @@ const STATE_EVID_FOTOS = "EVID_FOTOS";
 const STATE_MY_EVID_PICK_TIENDA = "MY_EVID_PICK_TIENDA";
 const STATE_MY_EVID_LIST = "MY_EVID_LIST";
 
-// Supervisor (básico)
+// Supervisor
 const STATE_SUP_MENU = "SUP_MENU";
 const STATE_SUP_PROMOTOR_LIST = "SUP_PROMOTOR_LIST";
 const STATE_SUP_FOTOS_LIST = "SUP_FOTOS_LIST";
 const STATE_SUP_ELEGIR_GRUPO = "SUP_ELEGIR_GRUPO";
 
 // ==========================
-// SESIONES (hoja SESIONES A2:C)
+// SESIONES (SESIONES A:telefono B:estado C:data_json)
 // ==========================
 async function findSessionRow(telefono) {
   const rows = await getSheetValues("SESIONES!A2:C");
@@ -294,7 +295,7 @@ async function setSessionMeta(telefono, meta) {
 }
 
 // ==========================
-// Catálogos
+// Catálogos (PROMOTORES, SUPERVISORES, TIENDAS, ASIGNACIONES)
 // ==========================
 async function getSupervisorPorTelefono(telefono) {
   const rows = await getSheetValues("SUPERVISORES!A2:F");
@@ -361,12 +362,14 @@ async function getTiendasAsignadas(promotor_id) {
 // ==========================
 // VISITAS
 // ==========================
-async function getVisitsByDate(promotor_id, ymd) {
+async function getVisitsToday(promotor_id) {
   const rows = await getSheetValues("VISITAS!A2:F");
+  const fecha = todayISO();
   return rows
-    .filter((r) => norm(r[1]) === promotor_id && norm(r[3]) === ymd)
+    .filter((r) => norm(r[1]) === promotor_id && norm(r[3]) === fecha)
     .map((r) => ({
       visita_id: norm(r[0]),
+      promotor_id: norm(r[1]),
       tienda_id: norm(r[2]),
       fecha: norm(r[3]),
       hora_inicio: norm(r[4]),
@@ -374,13 +377,27 @@ async function getVisitsByDate(promotor_id, ymd) {
     }));
 }
 
-async function getVisitsToday(promotor_id) {
-  return await getVisitsByDate(promotor_id, todayISO());
-}
-
 async function getOpenVisitsToday(promotor_id) {
   const visits = await getVisitsToday(promotor_id);
   return visits.filter(v => !v.hora_fin).map(v => ({ visita_id: v.visita_id, tienda_id: v.tienda_id }));
+}
+
+async function getLastVisits(promotor_id, limit = 10) {
+  // 👈 FIX PRINCIPAL: historial NO depende de "hoy"
+  const rows = await getSheetValues("VISITAS!A2:F");
+  const visits = rows
+    .filter(r => norm(r[1]) === promotor_id)
+    .map(r => ({
+      visita_id: norm(r[0]),
+      promotor_id: norm(r[1]),
+      tienda_id: norm(r[2]),
+      fecha: norm(r[3]),
+      hora_inicio: norm(r[4]),
+      hora_fin: norm(r[5]),
+    }));
+
+  visits.sort((a, b) => (b.hora_inicio || "").localeCompare(a.hora_inicio || ""));
+  return visits.slice(0, limit);
 }
 
 async function findOpenVisit(promotor_id, tienda_id) {
@@ -447,11 +464,7 @@ async function getReglasPorMarca(marca_id) {
 }
 
 // ==========================
-// EVIDENCIAS (A:Q) — respeta tu estructura actual
-// Columns:
-// evidencia_id, telefono, fecha_hora, tipo_evento, origen, jornada_id,
-// visita_id, url_foto, lat, lon, resultado_ai, score_confianza, riesgo,
-// marca_id, producto_id, tipo_evidencia, descripcion
+// EVIDENCIAS (A:Q)
 // ==========================
 function demoAnalisis(tipo_evento) {
   const t = upper(tipo_evento);
@@ -495,7 +508,6 @@ async function hasAsistenciaEvento(visita_id, tipo_evento) {
   return false;
 }
 
-// Devuelve la ENTRADA/SALIDA "más reciente" (para correcciones)
 async function getAsistenciaMetaByVisita(visita_id) {
   const rows = await getSheetValues("EVIDENCIAS!A2:Q");
   let entrada = { url: "", fecha_hora: "" };
@@ -516,6 +528,7 @@ async function getAsistenciaMetaByVisita(visita_id) {
       if (!salida.fecha_hora || fh > salida.fecha_hora) salida = { url, fecha_hora: fh };
     }
   }
+
   return { entrada, salida };
 }
 
@@ -564,8 +577,7 @@ function menuSupervisor(nombre="Supervisor") {
     `👋 *${nombre}* (Supervisor)\n\n` +
     `*${nEmoji(0)}* Evidencias hoy por promotor\n` +
     `*${nEmoji(1)}* Evidencias hoy MEDIO/ALTO\n` +
-    `*${nEmoji(2)}* Ayuda\n\n` +
-    "Comandos: `ver N`, `enviar 1,3`, `enviar todas`, `sup`, `menu`"
+    `*${nEmoji(2)}* Ayuda\n`
   );
 }
 
@@ -573,8 +585,8 @@ function ayudaSupervisor() {
   return (
     "🆘 *Ayuda Supervisor*\n\n" +
     "• `ver 2` muestra la foto.\n" +
-    "• `enviar 1,3` envía esas evidencias a un grupo.\n" +
-    "• `enviar todas` envía todas las evidencias listadas.\n"
+    "• `enviar 1,3` envía esas evidencias.\n" +
+    "• `enviar todas` envía todo el listado.\n"
   );
 }
 
@@ -589,7 +601,6 @@ async function resumenDia(telefono) {
   const abiertas = visits.filter(v => !v.hora_fin);
   const cerradas = visits.filter(v => v.hora_fin);
 
-  // contar eventos desde EVIDENCIAS por "hoy CDMX"
   const rows = await getSheetValues("EVIDENCIAS!A2:Q");
   const hoy = todayISO();
 
@@ -607,17 +618,34 @@ async function resumenDia(telefono) {
     if (origen === "EVIDENCIA") evid++;
   }
 
-  let msg = `📊 *Resumen del día* (${hoy})\n\n`;
-  msg += `🏬 Visitas: ${visits.length} (abiertas ${abiertas.length}, cerradas ${cerradas.length})\n`;
-  msg += `📸 Evidencias: ${evid}\n`;
-  msg += `🕒 Asistencia (eventos): ${asis}\n\n`;
-  msg += "Escribe `menu` para volver.";
-  return msg;
+  return (
+    `📊 *Resumen del día* (${hoy})\n\n` +
+    `🏬 Visitas: ${visits.length} (abiertas ${abiertas.length}, cerradas ${cerradas.length})\n` +
+    `📸 Evidencias: ${evid}\n` +
+    `🕒 Asistencia (eventos): ${asis}\n\n` +
+    "Escribe `menu` para volver."
+  );
 }
 
 // ==========================
 // ASISTENCIA
 // ==========================
+async function buildHistorial(telefono, promotor_id) {
+  const tiendaMap = await getTiendaMap();
+  const out = await getLastVisits(promotor_id, 10);
+
+  let msg = "📚 *Historial (últimas 10)*\n\n";
+  out.forEach((v, idx) => {
+    const tn = tiendaMap[v.tienda_id]?.nombre_tienda || v.tienda_id;
+    const ent = v.hora_inicio ? fmtDateTimeTZ(v.hora_inicio) : "—";
+    const sal = v.hora_fin ? fmtDateTimeTZ(v.hora_fin) : "pendiente";
+    msg += `*${nEmoji(idx)}* ${v.fecha} – ${tn}\n   🟢 Entrada: ${ent}\n   🔴 Salida: ${sal}\n`;
+  });
+  msg += "\nComando: `fotos 2` para ver fotos de esa visita.\n`menu` para volver.";
+
+  return { listado: out, msg };
+}
+
 async function startAsistenciaHome(telefono) {
   const prom = await getPromotorPorTelefono(telefono);
   if (!prom || !prom.activo) return "⚠️ No estás como promotor activo.";
@@ -659,7 +687,6 @@ async function startAsistenciaHome(telefono) {
     );
   }
 
-  // varias activas
   await setSession(telefono, STATE_ASIS_PICK_ACTIVA, { promotor_id: prom.promotor_id });
 
   let msg = "🕒 *Asistencia*\n\n⚠️ Tienes *varias tiendas activas*. Elige cuál administrar:\n\n";
@@ -671,22 +698,6 @@ async function startAsistenciaHome(telefono) {
   return msg;
 }
 
-async function buildHistorial(telefono, promotor_id) {
-  const tiendaMap = await getTiendaMap();
-  const visits = await getVisitsToday(promotor_id);
-  const out = visits.slice(-10).reverse();
-
-  let msg = "📚 *Historial (últimas 10)*\n\n";
-  out.forEach((v, idx) => {
-    const tn = tiendaMap[v.tienda_id]?.nombre_tienda || v.tienda_id;
-    const ent = v.hora_inicio ? fmtDateTimeTZ(v.hora_inicio) : "—";
-    const sal = v.hora_fin ? fmtDateTimeTZ(v.hora_fin) : "pendiente";
-    msg += `*${nEmoji(idx)}* ${tn}\n   🟢 Entrada: ${ent}\n   🔴 Salida: ${sal}\n`;
-  });
-  msg += "\nComando: `fotos 2` para ver fotos de esa visita.\n`menu` para volver.";
-  return { listado: out, msg };
-}
-
 async function handleAsistencia(telefono, estado, text, data, inbound, baseUrl) {
   const lower = norm(text).toLowerCase();
   const prom = await getPromotorPorTelefono(telefono);
@@ -694,7 +705,6 @@ async function handleAsistencia(telefono, estado, text, data, inbound, baseUrl) 
 
   const tiendaMap = await getTiendaMap();
 
-  // --- HOME (sin tienda activa)
   if (estado === STATE_ASIS_HOME) {
     if (lower === "3") { await setSession(telefono, STATE_MENU, {}); return menuPromotor(); }
 
@@ -719,7 +729,6 @@ async function handleAsistencia(telefono, estado, text, data, inbound, baseUrl) 
     return await startAsistenciaHome(telefono);
   }
 
-  // --- PICK ACTIVA (varias tiendas)
   if (estado === STATE_ASIS_PICK_ACTIVA) {
     const abiertas = await getOpenVisitsToday(prom.promotor_id);
     const idx = safeInt(text, -1) - 1;
@@ -740,20 +749,17 @@ async function handleAsistencia(telefono, estado, text, data, inbound, baseUrl) 
       `*${nEmoji(1)}* Ver fotos asistencia\n` +
       `*${nEmoji(2)}* Cambiar foto ENTRADA\n` +
       `*${nEmoji(3)}* Cambiar foto SALIDA\n` +
-      `*${nEmoji(4)}* Volver (lista de activas)`
+      `*${nEmoji(4)}* Volver (lista de activas)\n` +
+      `*${nEmoji(5)}* Volver al menú`
     );
   }
 
-  // --- ACTIVA MENU
   if (estado === STATE_ASIS_ACTIVA_MENU) {
     const tn = data.tienda_nombre || "Tienda";
 
-    // 5) volver a lista activas (si hay varias), o refrescar home
-    if (lower === "5" || lower === "4") {
-      return await startAsistenciaHome(telefono);
-    }
+    if (lower === "6") { await setSession(telefono, STATE_MENU, {}); return menuPromotor(); }
+    if (lower === "5") { return await startAsistenciaHome(telefono); }
 
-    // 1) salida
     if (lower === "1") {
       await setSession(telefono, STATE_ASIS_FOTO, {
         accion: "SALIDA",
@@ -765,7 +771,6 @@ async function handleAsistencia(telefono, estado, text, data, inbound, baseUrl) 
       return `📸 Envía foto de *SALIDA* – ${tn}`;
     }
 
-    // 2) ver fotos asistencia con fecha/hora
     if (lower === "2") {
       const meta = await getAsistenciaMetaByVisita(data.visita_id);
       const medias = [];
@@ -781,7 +786,6 @@ async function handleAsistencia(telefono, estado, text, data, inbound, baseUrl) 
       return { text: caption, mediaUrl: medias };
     }
 
-    // 3) cambiar entrada
     if (lower === "3") {
       const ok = await hasAsistenciaEvento(data.visita_id, "ASISTENCIA_ENTRADA");
       if (!ok) return "⚠️ No existe foto de ENTRADA para cambiar.";
@@ -794,7 +798,6 @@ async function handleAsistencia(telefono, estado, text, data, inbound, baseUrl) 
       return `🔁 Cambiar ENTRADA – ${tn}\n📸 Envía la nueva foto.`;
     }
 
-    // 4) cambiar salida
     if (lower === "4") {
       const ok = await hasAsistenciaEvento(data.visita_id, "ASISTENCIA_SALIDA");
       if (!ok) return "⚠️ Aún no hay SALIDA registrada. Primero registra salida.";
@@ -807,35 +810,19 @@ async function handleAsistencia(telefono, estado, text, data, inbound, baseUrl) 
       return `🔁 Cambiar SALIDA – ${tn}\n📸 Envía la nueva foto.`;
     }
 
-    // 5) entrada otra tienda
-    if (lower === "5") {
-      const asignadas = await getTiendasAsignadas(prom.promotor_id);
-      const tiendas = asignadas.map(id => tiendaMap[id]).filter(t => t && t.activa);
-      await setSession(telefono, STATE_ASIS_PICK_ENTRADA, { promotor_id: prom.promotor_id, tiendas, filtradas: [] });
+    if (lower === "5") return await startAsistenciaHome(telefono);
 
-      let msg = "🏬 *Entrada* – Elige tienda o escribe texto:\n\n";
-      tiendas.slice(0, 10).forEach((t, idx) => msg += `*${nEmoji(idx)}* ${t.nombre_tienda}\n`);
-      msg += "\nResponde con número o texto.";
-      return msg;
-    }
-
-    // 6) historial
     if (lower === "6") {
       const { listado, msg } = await buildHistorial(telefono, prom.promotor_id);
       await setSession(telefono, STATE_ASIS_HIST, { listado });
       return msg;
     }
 
-    // 7) menu
-    if (lower === "7") {
-      await setSession(telefono, STATE_MENU, {});
-      return menuPromotor();
-    }
+    if (lower === "7") { await setSession(telefono, STATE_MENU, {}); return menuPromotor(); }
 
     return "Responde con una opción del menú.";
   }
 
-  // --- PICK ENTRADA (lista/búsqueda)
   if (estado === STATE_ASIS_PICK_ENTRADA) {
     const tiendas = data.tiendas || [];
     const q = norm(text);
@@ -874,7 +861,6 @@ async function handleAsistencia(telefono, estado, text, data, inbound, baseUrl) 
     return `📸 Envía foto de *ENTRADA* – ${tienda.nombre_tienda}`;
   }
 
-  // --- FOTO (entrada/salida)
   if (estado === STATE_ASIS_FOTO) {
     const numMedia = safeInt(inbound?.NumMedia || "0", 0);
     if (numMedia < 1) return "Necesito una foto. Adjunta y reenvía.";
@@ -883,7 +869,6 @@ async function handleAsistencia(telefono, estado, text, data, inbound, baseUrl) 
     return "✅ Foto recibida.\n📍 Comparte ubicación (Share location).";
   }
 
-  // --- UBI (entrada/salida)
   if (estado === STATE_ASIS_UBI) {
     const lat = inbound?.Latitude || inbound?.Latitude0 || "";
     const lon = inbound?.Longitude || inbound?.Longitude0 || "";
@@ -908,7 +893,6 @@ async function handleAsistencia(telefono, estado, text, data, inbound, baseUrl) 
       return `✅ Entrada registrada – *${data.tienda_nombre}*\n\n` + menuPromotor();
     }
 
-    // SALIDA
     await closeVisitById(data.visita_id);
 
     await registrarEvidencia({
@@ -927,7 +911,6 @@ async function handleAsistencia(telefono, estado, text, data, inbound, baseUrl) 
     return `✅ Salida registrada – *${data.tienda_nombre}*\n\n` + menuPromotor();
   }
 
-  // --- HIST
   if (estado === STATE_ASIS_HIST) {
     const listado = data.listado || [];
     if (lower.startsWith("fotos")) {
@@ -952,7 +935,6 @@ async function handleAsistencia(telefono, estado, text, data, inbound, baseUrl) 
     return "Comando: `fotos N` o `menu`.";
   }
 
-  // --- CAMBIAR FOTO (foto -> ubicación)
   if (estado === STATE_ASIS_CAMBIAR_FOTO) {
     if (data.paso === "FOTO") {
       const numMedia = safeInt(inbound?.NumMedia || "0", 0);
@@ -1067,7 +1049,9 @@ async function handleEvidencias(telefono, estado, text, data, inbound) {
     });
 
     let msg = `🏷️ Marca: *${marca.marca_nombre}*\n\n🧾 Tipo de evidencia:\n\n`;
-    reglas.slice(0,10).forEach((r,i) => msg += `*${nEmoji(i)}* ${r.tipo_evidencia} (fotos: ${r.fotos_requeridas}${r.requiere_antes_despues ? ", antes/después" : ""})\n`);
+    reglas.slice(0,10).forEach((r,i) =>
+      msg += `*${nEmoji(i)}* ${r.tipo_evidencia} (fotos: ${r.fotos_requeridas}${r.requiere_antes_despues ? ", antes/después" : ""})\n`
+    );
     msg += "\nResponde con número.";
     return msg;
   }
@@ -1147,7 +1131,7 @@ async function handleEvidencias(telefono, estado, text, data, inbound) {
 }
 
 // ==========================
-// MIS EVIDENCIAS (por tienda, con conteo, ver todas)
+// MIS EVIDENCIAS (conteo por tienda + ver todas)
 // ==========================
 async function startMisEvidencias(telefono, baseUrl) {
   const prom = await getPromotorPorTelefono(telefono);
@@ -1168,8 +1152,7 @@ async function startMisEvidencias(telefono, baseUrl) {
     if (norm(r[1]) !== telefono) continue;
     const fh = norm(r[2]);
     if (!fh) continue;
-    const ymd = ymdInTZ(new Date(fh), APP_TZ);
-    if (ymd !== hoy) continue;
+    if (ymdInTZ(new Date(fh), APP_TZ) !== hoy) continue;
     if (upper(r[4]) !== "EVIDENCIA") continue;
 
     const visita_id = norm(r[6]);
@@ -1245,7 +1228,7 @@ async function handleMisEvidencias(telefono, estado, text, data, inbound, baseUr
       const urls = list.map(x => x.url_foto).filter(Boolean).slice(0, 20);
       if (!urls.length) return "📭 No hay fotos para mostrar.";
 
-      // En WhatsApp/TwiML: 1 media por mensaje es lo más estable.
+      // 1 media por mensaje (WhatsApp/TwiML estable)
       const msgs = urls.map((u, i) => ({
         text: `📷 ${data.tiendaSel?.tienda_nombre || ""} – ${i + 1}/${urls.length}`,
         mediaUrl: proxifyMediaUrl(baseUrl, u),
@@ -1275,7 +1258,7 @@ async function handleMisEvidencias(telefono, estado, text, data, inbound, baseUr
 }
 
 // ==========================
-// SUPERVISOR (mínimo funcional)
+// SUPERVISOR (mínimo)
 // ==========================
 async function getEvidenciasHoyForSupervisor() {
   const rows = await getSheetValues("EVIDENCIAS!A2:Q");
@@ -1297,7 +1280,7 @@ async function getEvidenciasHoyForSupervisor() {
     }));
 }
 
-async function enviarFotoAGrupoCliente(ev, grupo) {
+async function enviarFotoAGrupoCliente(ev, grupo, baseUrl) {
   if (!twilioClient || !TWILIO_WHATSAPP_FROM) return { ok: false, enviados: 0 };
   let enviados = 0;
 
@@ -1307,7 +1290,7 @@ async function enviarFotoAGrupoCliente(ev, grupo) {
         from: TWILIO_WHATSAPP_FROM,
         to,
         body: `🏪 Evidencia\n⚠️ ${ev.riesgo}\n🧾 ${ev.tipo_evento}\n📅 ${fmtDateTimeTZ(ev.fecha_hora)}`,
-        mediaUrl: ev.url_foto ? [ev.url_foto] : undefined,
+        mediaUrl: ev.url_foto ? [proxifyMediaUrl(baseUrl, ev.url_foto)] : undefined,
       });
       enviados++;
     } catch (e) {
@@ -1435,7 +1418,7 @@ async function handleSupervisor(telefono, estado, text, data, baseUrl) {
 
     let okCount = 0;
     for (const ev of (data.seleccionadas || [])) {
-      const r = await enviarFotoAGrupoCliente(ev, grupo);
+      const r = await enviarFotoAGrupoCliente(ev, grupo, baseUrl);
       if (r.ok) okCount++;
     }
 
@@ -1448,7 +1431,7 @@ async function handleSupervisor(telefono, estado, text, data, baseUrl) {
 }
 
 // ==========================
-// Router principal + idempotencia + multi-messages
+// Router principal
 // ==========================
 async function handleIncoming(from, body, inbound, baseUrl) {
   const telefono = norm(from);
@@ -1458,22 +1441,20 @@ async function handleIncoming(from, body, inbound, baseUrl) {
   const msgSid = norm(inbound?.MessageSid || "");
   const ses = await getSession(telefono);
 
-  // Idempotencia (retry)
+  // Idempotencia retry
   if (msgSid && ses.data_json?._last_sid === msgSid && ses.data_json?._last_resp) {
     return ses.data_json._last_resp;
   }
 
-  // global commands
+  // global
   if (lower === "menu" || lower === "inicio") {
     await setSession(telefono, STATE_MENU, {});
     return menuPromotor();
   }
-
   if (lower === "ayuda" || lower === "help" || lower === "?") {
     await setSession(telefono, STATE_MENU, {});
     return ayudaPromotor();
   }
-
   if (lower === "sup") {
     const sup = await getSupervisorPorTelefono(telefono);
     if (!sup) return "⚠️ Tu número no está dado de alta como supervisor.";
@@ -1489,7 +1470,7 @@ async function handleIncoming(from, body, inbound, baseUrl) {
     return await handleSupervisor(telefono, estado, text, data, baseUrl);
   }
 
-  // Menu principal
+  // Menu promotor
   if (estado === STATE_MENU) {
     if (lower === "1") { await setSession(telefono, STATE_ASIS_HOME, {}); return await startAsistenciaHome(telefono); }
     if (lower === "2") { return await startEvidencias(telefono); }
@@ -1499,17 +1480,15 @@ async function handleIncoming(from, body, inbound, baseUrl) {
     return menuPromotor();
   }
 
-  // Asistencia flow
+  // Flujos
   if ([STATE_ASIS_HOME, STATE_ASIS_PICK_ENTRADA, STATE_ASIS_PICK_ACTIVA, STATE_ASIS_ACTIVA_MENU, STATE_ASIS_FOTO, STATE_ASIS_UBI, STATE_ASIS_HIST, STATE_ASIS_CAMBIAR_FOTO].includes(estado)) {
     return await handleAsistencia(telefono, estado, text, data, inbound, baseUrl);
   }
 
-  // Evidencias flow
   if ([STATE_EVID_PICK_VISITA, STATE_EVID_PICK_MARCA, STATE_EVID_PICK_TIPO, STATE_EVID_PICK_FASE, STATE_EVID_FOTOS].includes(estado)) {
     return await handleEvidencias(telefono, estado, text, data, inbound);
   }
 
-  // Mis evidencias flow
   if ([STATE_MY_EVID_PICK_TIENDA, STATE_MY_EVID_LIST].includes(estado)) {
     return await handleMisEvidencias(telefono, estado, text, data, inbound, baseUrl);
   }
@@ -1518,6 +1497,9 @@ async function handleIncoming(from, body, inbound, baseUrl) {
   return menuPromotor();
 }
 
+// ==========================
+// Express /whatsapp
+// ==========================
 app.post("/whatsapp", async (req, res) => {
   const from = norm(req.body.From);
   const body = norm(req.body.Body);
@@ -1532,7 +1514,6 @@ app.post("/whatsapp", async (req, res) => {
       respuesta = "Ocurrió un error procesando tu mensaje. Intenta de nuevo 🙏";
     }
 
-    // guardar meta idempotencia (texto)
     const sid = norm(req.body.MessageSid || "");
     if (sid) {
       const respText =
@@ -1548,7 +1529,7 @@ app.post("/whatsapp", async (req, res) => {
       twiml.message(respuesta);
     } else if (respuesta && typeof respuesta === "object") {
       if (respuesta.messages && Array.isArray(respuesta.messages)) {
-        // multi mensajes (ver todas)
+        // múltiples mensajes (ver todas)
         for (const m of respuesta.messages) {
           const msg = twiml.message(m.text || "");
           if (m.mediaUrl) msg.media(m.mediaUrl);
