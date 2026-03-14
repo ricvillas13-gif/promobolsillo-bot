@@ -20,6 +20,48 @@ const {
 
 const MEDIA_TTL = parseInt(MEDIA_PROXY_TTL_SECONDS || "3600", 10);
 
+// ==========================
+// App TZ (para que HOY sea CDMX, no UTC)
+// ==========================
+const APP_TZ = "America/Mexico_City";
+
+function ymdInTZ(date = new Date(), tz = APP_TZ) {
+  // 'sv-SE' -> YYYY-MM-DD
+  return new Intl.DateTimeFormat("sv-SE", {
+    timeZone: tz,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(date);
+}
+
+function hmInTZ(date = new Date(), tz = APP_TZ) {
+  return new Intl.DateTimeFormat("es-MX", {
+    timeZone: tz,
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(date);
+}
+
+function fmtDateTimeTZ(iso, tz = APP_TZ) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return `${ymdInTZ(d, tz)} ${hmInTZ(d, tz)}`;
+}
+
+function todayISO() {
+  return ymdInTZ(new Date(), APP_TZ);
+}
+
+function nowISO() {
+  return new Date().toISOString();
+}
+
+// ==========================
+// Twilio client (solo para enviar outbound / supervisor)
+// ==========================
 let twilioClient = null;
 if (TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN) {
   twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
@@ -111,14 +153,17 @@ function safeInt(v, def = 0) {
   const n = parseInt(v, 10);
   return Number.isNaN(n) ? def : n;
 }
-function todayISO() { return new Date().toISOString().slice(0, 10); }
-function nowISO() { return new Date().toISOString(); }
 
 function buildBaseUrl(req) {
   if (PUBLIC_BASE_URL) return PUBLIC_BASE_URL.replace(/\/+$/, "");
   const proto = (req.headers["x-forwarded-proto"] || "https").toString();
   const host = (req.headers["x-forwarded-host"] || req.headers.host || "").toString();
   return `${proto}://${host}`.replace(/\/+$/, "");
+}
+
+function nEmoji(i) {
+  const arr = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"];
+  return arr[i] || `${i + 1})`;
 }
 
 // ==========================
@@ -173,7 +218,7 @@ app.get("/media", async (req, res) => {
 // ==========================
 const STATE_MENU = "MENU";
 
-// Asistencia contextual
+// Asistencia
 const STATE_ASIS_HOME = "ASIS_HOME";
 const STATE_ASIS_PICK_ENTRADA = "ASIS_PICK_ENTRADA";
 const STATE_ASIS_PICK_ACTIVA = "ASIS_PICK_ACTIVA";
@@ -181,7 +226,7 @@ const STATE_ASIS_ACTIVA_MENU = "ASIS_ACTIVA_MENU";
 const STATE_ASIS_FOTO = "ASIS_FOTO";
 const STATE_ASIS_UBI = "ASIS_UBI";
 const STATE_ASIS_HIST = "ASIS_HIST";
-const STATE_ASIS_CAMBIAR_FOTO = "ASIS_CAMBIAR_FOTO";
+const STATE_ASIS_CAMBIAR_FOTO = "ASIS_CAMBIAR_FOTO"; // paso FOTO -> UBI
 
 // Evidencias
 const STATE_EVID_PICK_VISITA = "EVID_PICK_VISITA";
@@ -190,7 +235,7 @@ const STATE_EVID_PICK_TIPO = "EVID_PICK_TIPO";
 const STATE_EVID_PICK_FASE = "EVID_PICK_FASE";
 const STATE_EVID_FOTOS = "EVID_FOTOS";
 
-// Mis evidencias (por tienda)
+// Mis evidencias
 const STATE_MY_EVID_PICK_TIENDA = "MY_EVID_PICK_TIENDA";
 const STATE_MY_EVID_LIST = "MY_EVID_LIST";
 
@@ -201,7 +246,7 @@ const STATE_SUP_FOTOS_LIST = "SUP_FOTOS_LIST";
 const STATE_SUP_ELEGIR_GRUPO = "SUP_ELEGIR_GRUPO";
 
 // ==========================
-// SESIONES
+// SESIONES (hoja SESIONES A2:C)
 // ==========================
 async function findSessionRow(telefono) {
   const rows = await getSheetValues("SESIONES!A2:C");
@@ -316,17 +361,21 @@ async function getTiendasAsignadas(promotor_id) {
 // ==========================
 // VISITAS
 // ==========================
-async function getVisitsToday(promotor_id) {
+async function getVisitsByDate(promotor_id, ymd) {
   const rows = await getSheetValues("VISITAS!A2:F");
-  const fecha = todayISO();
   return rows
-    .filter((r) => norm(r[1]) === promotor_id && norm(r[3]) === fecha)
+    .filter((r) => norm(r[1]) === promotor_id && norm(r[3]) === ymd)
     .map((r) => ({
       visita_id: norm(r[0]),
       tienda_id: norm(r[2]),
+      fecha: norm(r[3]),
       hora_inicio: norm(r[4]),
       hora_fin: norm(r[5]),
     }));
+}
+
+async function getVisitsToday(promotor_id) {
+  return await getVisitsByDate(promotor_id, todayISO());
 }
 
 async function getOpenVisitsToday(promotor_id) {
@@ -398,7 +447,11 @@ async function getReglasPorMarca(marca_id) {
 }
 
 // ==========================
-// EVIDENCIAS (A:Q) + asistencia meta
+// EVIDENCIAS (A:Q) — respeta tu estructura actual
+// Columns:
+// evidencia_id, telefono, fecha_hora, tipo_evento, origen, jornada_id,
+// visita_id, url_foto, lat, lon, resultado_ai, score_confianza, riesgo,
+// marca_id, producto_id, tipo_evidencia, descripcion
 // ==========================
 function demoAnalisis(tipo_evento) {
   const t = upper(tipo_evento);
@@ -418,7 +471,7 @@ async function registrarEvidencia(payload) {
     nowISO(),
     payload.tipo_evento,
     payload.origen,
-    "",
+    "", // jornada_id
     payload.visita_id,
     payload.url_foto,
     payload.lat || "",
@@ -434,20 +487,6 @@ async function registrarEvidencia(payload) {
   return a;
 }
 
-async function getAsistenciaMetaByVisita(visita_id) {
-  const rows = await getSheetValues("EVIDENCIAS!A2:Q");
-  let entrada = { url: "", fecha_hora: "" };
-  let salida = { url: "", fecha_hora: "" };
-  for (const r of rows) {
-    if (norm(r[6]) !== visita_id) continue;
-    if (upper(r[4]) !== "ASISTENCIA") continue;
-    const tipo = norm(r[3]);
-    if (tipo === "ASISTENCIA_ENTRADA") entrada = { url: norm(r[7]), fecha_hora: norm(r[2]) };
-    if (tipo === "ASISTENCIA_SALIDA") salida = { url: norm(r[7]), fecha_hora: norm(r[2]) };
-  }
-  return { entrada, salida };
-}
-
 async function hasAsistenciaEvento(visita_id, tipo_evento) {
   const rows = await getSheetValues("EVIDENCIAS!A2:Q");
   for (const r of rows) {
@@ -456,12 +495,43 @@ async function hasAsistenciaEvento(visita_id, tipo_evento) {
   return false;
 }
 
+// Devuelve la ENTRADA/SALIDA "más reciente" (para correcciones)
+async function getAsistenciaMetaByVisita(visita_id) {
+  const rows = await getSheetValues("EVIDENCIAS!A2:Q");
+  let entrada = { url: "", fecha_hora: "" };
+  let salida = { url: "", fecha_hora: "" };
+
+  for (const r of rows) {
+    if (norm(r[6]) !== visita_id) continue;
+    if (upper(r[4]) !== "ASISTENCIA") continue;
+
+    const tipo = norm(r[3]);
+    const fh = norm(r[2]);
+    const url = norm(r[7]);
+
+    if (tipo === "ASISTENCIA_ENTRADA") {
+      if (!entrada.fecha_hora || fh > entrada.fecha_hora) entrada = { url, fecha_hora: fh };
+    }
+    if (tipo === "ASISTENCIA_SALIDA") {
+      if (!salida.fecha_hora || fh > salida.fecha_hora) salida = { url, fecha_hora: fh };
+    }
+  }
+  return { entrada, salida };
+}
+
 // ==========================
-// UI helpers
+// GRUPOS_CLIENTE
 // ==========================
-function nEmoji(i) {
-  const arr = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"];
-  return arr[i] || `${i + 1})`;
+async function getGruposClienteActivos() {
+  const rows = await getSheetValues("GRUPOS_CLIENTE!A2:E");
+  return rows
+    .filter((r) => isTrue(r[4] ?? "TRUE"))
+    .map((r) => ({
+      grupo_id: norm(r[0]),
+      nombre_grupo: norm(r[1]),
+      cliente: norm(r[2]),
+      telefonos: norm(r[3]).split(",").map(norm).filter(Boolean),
+    }));
 }
 
 // ==========================
@@ -482,8 +552,8 @@ function menuPromotor() {
 function ayudaPromotor() {
   return (
     "🆘 *Ayuda*\n\n" +
-    "• Asistencia es contextual (si no hay entrada te ofrece ENTRADA).\n" +
-    "• Evidencias: manda fotos según regla. Puedes mandar varias en un solo mensaje.\n" +
+    "• Asistencia: si NO hay tienda activa, te ofrece ENTRADA.\n" +
+    "• Evidencias: manda fotos según regla (puedes mandar varias juntas).\n" +
     "• Mis evidencias: elige tienda y usa `ver N` o `ver todas`.\n\n" +
     "Escribe `menu` para volver."
   );
@@ -494,7 +564,17 @@ function menuSupervisor(nombre="Supervisor") {
     `👋 *${nombre}* (Supervisor)\n\n` +
     `*${nEmoji(0)}* Evidencias hoy por promotor\n` +
     `*${nEmoji(1)}* Evidencias hoy MEDIO/ALTO\n` +
-    `*${nEmoji(2)}* Ayuda\n`
+    `*${nEmoji(2)}* Ayuda\n\n` +
+    "Comandos: `ver N`, `enviar 1,3`, `enviar todas`, `sup`, `menu`"
+  );
+}
+
+function ayudaSupervisor() {
+  return (
+    "🆘 *Ayuda Supervisor*\n\n" +
+    "• `ver 2` muestra la foto.\n" +
+    "• `enviar 1,3` envía esas evidencias a un grupo.\n" +
+    "• `enviar todas` envía todas las evidencias listadas.\n"
   );
 }
 
@@ -505,31 +585,30 @@ async function resumenDia(telefono) {
   const prom = await getPromotorPorTelefono(telefono);
   if (!prom || !prom.activo) return "⚠️ No estás como promotor activo.";
 
-  const tiendaMap = await getTiendaMap();
   const visits = await getVisitsToday(prom.promotor_id);
   const abiertas = visits.filter(v => !v.hora_fin);
   const cerradas = visits.filter(v => v.hora_fin);
 
+  // contar eventos desde EVIDENCIAS por "hoy CDMX"
   const rows = await getSheetValues("EVIDENCIAS!A2:Q");
   const hoy = todayISO();
+
   let asis = 0;
   let evid = 0;
-
   for (const r of rows) {
     if (norm(r[1]) !== telefono) continue;
-    if (!norm(r[2]) || norm(r[2]).slice(0,10) !== hoy) continue;
-    if (upper(r[4]) === "ASISTENCIA") asis++;
-    if (upper(r[4]) === "EVIDENCIA") evid++;
+    const fh = norm(r[2]);
+    if (!fh) continue;
+    const ymd = ymdInTZ(new Date(fh), APP_TZ);
+    if (ymd !== hoy) continue;
+
+    const origen = upper(r[4]);
+    if (origen === "ASISTENCIA") asis++;
+    if (origen === "EVIDENCIA") evid++;
   }
 
-  let msg = "📊 *Resumen del día (hoy)*\n\n";
+  let msg = `📊 *Resumen del día* (${hoy})\n\n`;
   msg += `🏬 Visitas: ${visits.length} (abiertas ${abiertas.length}, cerradas ${cerradas.length})\n`;
-  if (abiertas.length === 1) {
-    const tn = tiendaMap[abiertas[0].tienda_id]?.nombre_tienda || abiertas[0].tienda_id;
-    msg += `✅ Tienda activa: *${tn}*\n`;
-  } else if (abiertas.length > 1) {
-    msg += `⚠️ Tiendas activas: *${abiertas.length}*\n`;
-  }
   msg += `📸 Evidencias: ${evid}\n`;
   msg += `🕒 Asistencia (eventos): ${asis}\n\n`;
   msg += "Escribe `menu` para volver.";
@@ -537,7 +616,7 @@ async function resumenDia(telefono) {
 }
 
 // ==========================
-// ASISTENCIA (contextual + multi activas funcional)
+// ASISTENCIA
 // ==========================
 async function startAsistenciaHome(telefono) {
   const prom = await getPromotorPorTelefono(telefono);
@@ -560,12 +639,14 @@ async function startAsistenciaHome(telefono) {
   if (abiertas.length === 1) {
     const a = abiertas[0];
     const tn = tiendaMap[a.tienda_id]?.nombre_tienda || a.tienda_id;
+
     await setSession(telefono, STATE_ASIS_ACTIVA_MENU, {
       promotor_id: prom.promotor_id,
       visita_id: a.visita_id,
       tienda_id: a.tienda_id,
       tienda_nombre: tn,
     });
+
     return (
       `🕒 *Asistencia* – Tienda activa: *${tn}*\n\n` +
       `*${nEmoji(0)}* Registrar *SALIDA*\n` +
@@ -578,6 +659,7 @@ async function startAsistenciaHome(telefono) {
     );
   }
 
+  // varias activas
   await setSession(telefono, STATE_ASIS_PICK_ACTIVA, { promotor_id: prom.promotor_id });
 
   let msg = "🕒 *Asistencia*\n\n⚠️ Tienes *varias tiendas activas*. Elige cuál administrar:\n\n";
@@ -589,6 +671,22 @@ async function startAsistenciaHome(telefono) {
   return msg;
 }
 
+async function buildHistorial(telefono, promotor_id) {
+  const tiendaMap = await getTiendaMap();
+  const visits = await getVisitsToday(promotor_id);
+  const out = visits.slice(-10).reverse();
+
+  let msg = "📚 *Historial (últimas 10)*\n\n";
+  out.forEach((v, idx) => {
+    const tn = tiendaMap[v.tienda_id]?.nombre_tienda || v.tienda_id;
+    const ent = v.hora_inicio ? fmtDateTimeTZ(v.hora_inicio) : "—";
+    const sal = v.hora_fin ? fmtDateTimeTZ(v.hora_fin) : "pendiente";
+    msg += `*${nEmoji(idx)}* ${tn}\n   🟢 Entrada: ${ent}\n   🔴 Salida: ${sal}\n`;
+  });
+  msg += "\nComando: `fotos 2` para ver fotos de esa visita.\n`menu` para volver.";
+  return { listado: out, msg };
+}
+
 async function handleAsistencia(telefono, estado, text, data, inbound, baseUrl) {
   const lower = norm(text).toLowerCase();
   const prom = await getPromotorPorTelefono(telefono);
@@ -596,10 +694,11 @@ async function handleAsistencia(telefono, estado, text, data, inbound, baseUrl) 
 
   const tiendaMap = await getTiendaMap();
 
+  // --- HOME (sin tienda activa)
   if (estado === STATE_ASIS_HOME) {
     if (lower === "3") { await setSession(telefono, STATE_MENU, {}); return menuPromotor(); }
+
     if (lower === "1") {
-      // entrada: lista asignadas
       const asignadas = await getTiendasAsignadas(prom.promotor_id);
       const tiendas = asignadas.map(id => tiendaMap[id]).filter(t => t && t.activa);
 
@@ -610,24 +709,17 @@ async function handleAsistencia(telefono, estado, text, data, inbound, baseUrl) 
       msg += "\nResponde con número o texto.";
       return msg;
     }
-    if (lower === "2") {
-      const visits = await getVisitsToday(prom.promotor_id);
-      const out = visits.slice(-10).reverse();
-      await setSession(telefono, STATE_ASIS_HIST, { listado: out });
 
-      let msg = "📚 *Historial (últimas 10)*\n\n";
-      out.forEach((v, idx) => {
-        const tn = tiendaMap[v.tienda_id]?.nombre_tienda || v.tienda_id;
-        const ent = v.hora_inicio ? v.hora_inicio.substring(11,16) : "—";
-        const sal = v.hora_fin ? v.hora_fin.substring(11,16) : "pendiente";
-        msg += `*${nEmoji(idx)}* ${tn} – entrada ${ent} / salida ${sal}\n`;
-      });
-      msg += "\nComando: `fotos 2` para ver fotos.";
+    if (lower === "2") {
+      const { listado, msg } = await buildHistorial(telefono, prom.promotor_id);
+      await setSession(telefono, STATE_ASIS_HIST, { listado });
       return msg;
     }
+
     return await startAsistenciaHome(telefono);
   }
 
+  // --- PICK ACTIVA (varias tiendas)
   if (estado === STATE_ASIS_PICK_ACTIVA) {
     const abiertas = await getOpenVisitsToday(prom.promotor_id);
     const idx = safeInt(text, -1) - 1;
@@ -646,18 +738,22 @@ async function handleAsistencia(telefono, estado, text, data, inbound, baseUrl) 
       `🕒 *Asistencia* – Tienda activa: *${tn}*\n\n` +
       `*${nEmoji(0)}* Registrar *SALIDA*\n` +
       `*${nEmoji(1)}* Ver fotos asistencia\n` +
-      `*${nEmoji(2)}* Volver (lista de activas)`
+      `*${nEmoji(2)}* Cambiar foto ENTRADA\n` +
+      `*${nEmoji(3)}* Cambiar foto SALIDA\n` +
+      `*${nEmoji(4)}* Volver (lista de activas)`
     );
   }
 
+  // --- ACTIVA MENU
   if (estado === STATE_ASIS_ACTIVA_MENU) {
     const tn = data.tienda_nombre || "Tienda";
-    if (lower === "2") {
-      // volver lista activas
-      await setSession(telefono, STATE_ASIS_PICK_ACTIVA, { promotor_id: prom.promotor_id });
+
+    // 5) volver a lista activas (si hay varias), o refrescar home
+    if (lower === "5" || lower === "4") {
       return await startAsistenciaHome(telefono);
     }
 
+    // 1) salida
     if (lower === "1") {
       await setSession(telefono, STATE_ASIS_FOTO, {
         accion: "SALIDA",
@@ -669,30 +765,77 @@ async function handleAsistencia(telefono, estado, text, data, inbound, baseUrl) 
       return `📸 Envía foto de *SALIDA* – ${tn}`;
     }
 
-    if (lower === "2" || lower === "ver" || lower === "fotos") {
+    // 2) ver fotos asistencia con fecha/hora
+    if (lower === "2") {
       const meta = await getAsistenciaMetaByVisita(data.visita_id);
       const medias = [];
       if (meta.entrada.url) medias.push(proxifyMediaUrl(baseUrl, meta.entrada.url));
       if (meta.salida.url) medias.push(proxifyMediaUrl(baseUrl, meta.salida.url));
+      if (!medias.length) return `📭 Aún no hay fotos de asistencia para ${tn}.`;
+
       const caption =
         `📷 *Asistencia* – ${tn}\n` +
-        (meta.entrada.fecha_hora ? `🟢 Entrada: ${meta.entrada.fecha_hora}\n` : "") +
-        (meta.salida.fecha_hora ? `🔴 Salida: ${meta.salida.fecha_hora}\n` : "");
-      if (!medias.length) return `📭 Aún no hay fotos de asistencia para ${tn}.`;
+        (meta.entrada.fecha_hora ? `🟢 Entrada: ${fmtDateTimeTZ(meta.entrada.fecha_hora)}\n` : "") +
+        (meta.salida.fecha_hora ? `🔴 Salida: ${fmtDateTimeTZ(meta.salida.fecha_hora)}\n` : "");
+
       return { text: caption, mediaUrl: medias };
     }
 
-    if (lower === "2") return await startAsistenciaHome(telefono);
-
-    // menú completo (cuando hay 1 activa)
-    if (lower === "1" || lower === "2" || lower === "3" || lower === "4" || lower === "5" || lower === "6" || lower === "7") {
-      // si viene desde menú 1 activa, reusa startAsistenciaHome
-      return await startAsistenciaHome(telefono);
+    // 3) cambiar entrada
+    if (lower === "3") {
+      const ok = await hasAsistenciaEvento(data.visita_id, "ASISTENCIA_ENTRADA");
+      if (!ok) return "⚠️ No existe foto de ENTRADA para cambiar.";
+      await setSession(telefono, STATE_ASIS_CAMBIAR_FOTO, {
+        visita_id: data.visita_id,
+        tienda_nombre: tn,
+        tipo_evento: "ASISTENCIA_ENTRADA",
+        paso: "FOTO",
+      });
+      return `🔁 Cambiar ENTRADA – ${tn}\n📸 Envía la nueva foto.`;
     }
 
-    return "Responde 1, 2 o 3.";
+    // 4) cambiar salida
+    if (lower === "4") {
+      const ok = await hasAsistenciaEvento(data.visita_id, "ASISTENCIA_SALIDA");
+      if (!ok) return "⚠️ Aún no hay SALIDA registrada. Primero registra salida.";
+      await setSession(telefono, STATE_ASIS_CAMBIAR_FOTO, {
+        visita_id: data.visita_id,
+        tienda_nombre: tn,
+        tipo_evento: "ASISTENCIA_SALIDA",
+        paso: "FOTO",
+      });
+      return `🔁 Cambiar SALIDA – ${tn}\n📸 Envía la nueva foto.`;
+    }
+
+    // 5) entrada otra tienda
+    if (lower === "5") {
+      const asignadas = await getTiendasAsignadas(prom.promotor_id);
+      const tiendas = asignadas.map(id => tiendaMap[id]).filter(t => t && t.activa);
+      await setSession(telefono, STATE_ASIS_PICK_ENTRADA, { promotor_id: prom.promotor_id, tiendas, filtradas: [] });
+
+      let msg = "🏬 *Entrada* – Elige tienda o escribe texto:\n\n";
+      tiendas.slice(0, 10).forEach((t, idx) => msg += `*${nEmoji(idx)}* ${t.nombre_tienda}\n`);
+      msg += "\nResponde con número o texto.";
+      return msg;
+    }
+
+    // 6) historial
+    if (lower === "6") {
+      const { listado, msg } = await buildHistorial(telefono, prom.promotor_id);
+      await setSession(telefono, STATE_ASIS_HIST, { listado });
+      return msg;
+    }
+
+    // 7) menu
+    if (lower === "7") {
+      await setSession(telefono, STATE_MENU, {});
+      return menuPromotor();
+    }
+
+    return "Responde con una opción del menú.";
   }
 
+  // --- PICK ENTRADA (lista/búsqueda)
   if (estado === STATE_ASIS_PICK_ENTRADA) {
     const tiendas = data.tiendas || [];
     const q = norm(text);
@@ -731,6 +874,7 @@ async function handleAsistencia(telefono, estado, text, data, inbound, baseUrl) 
     return `📸 Envía foto de *ENTRADA* – ${tienda.nombre_tienda}`;
   }
 
+  // --- FOTO (entrada/salida)
   if (estado === STATE_ASIS_FOTO) {
     const numMedia = safeInt(inbound?.NumMedia || "0", 0);
     if (numMedia < 1) return "Necesito una foto. Adjunta y reenvía.";
@@ -739,6 +883,7 @@ async function handleAsistencia(telefono, estado, text, data, inbound, baseUrl) 
     return "✅ Foto recibida.\n📍 Comparte ubicación (Share location).";
   }
 
+  // --- UBI (entrada/salida)
   if (estado === STATE_ASIS_UBI) {
     const lat = inbound?.Latitude || inbound?.Latitude0 || "";
     const lon = inbound?.Longitude || inbound?.Longitude0 || "";
@@ -746,6 +891,7 @@ async function handleAsistencia(telefono, estado, text, data, inbound, baseUrl) 
 
     if (data.accion === "ENTRADA") {
       const visita_id = await createVisit(data.promotor_id, data.tienda_id);
+
       await registrarEvidencia({
         evidencia_id: `EV-${Date.now()}-1`,
         telefono,
@@ -755,13 +901,16 @@ async function handleAsistencia(telefono, estado, text, data, inbound, baseUrl) 
         url_foto: data.fotoUrl,
         lat, lon,
         tipo_evidencia: "ASISTENCIA",
+        descripcion: "",
       });
 
       await setSession(telefono, STATE_MENU, {});
       return `✅ Entrada registrada – *${data.tienda_nombre}*\n\n` + menuPromotor();
     }
 
+    // SALIDA
     await closeVisitById(data.visita_id);
+
     await registrarEvidencia({
       evidencia_id: `EV-${Date.now()}-1`,
       telefono,
@@ -771,12 +920,14 @@ async function handleAsistencia(telefono, estado, text, data, inbound, baseUrl) 
       url_foto: data.fotoUrl,
       lat, lon,
       tipo_evidencia: "ASISTENCIA",
+      descripcion: "",
     });
 
     await setSession(telefono, STATE_MENU, {});
     return `✅ Salida registrada – *${data.tienda_nombre}*\n\n` + menuPromotor();
   }
 
+  // --- HIST
   if (estado === STATE_ASIS_HIST) {
     const listado = data.listado || [];
     if (lower.startsWith("fotos")) {
@@ -784,24 +935,50 @@ async function handleAsistencia(telefono, estado, text, data, inbound, baseUrl) 
       if (idx < 0 || idx >= listado.length) return "⚠️ Usa `fotos 1`..";
       const v = listado[idx];
       const tn = tiendaMap[v.tienda_id]?.nombre_tienda || v.tienda_id;
+
       const meta = await getAsistenciaMetaByVisita(v.visita_id);
       const medias = [];
       if (meta.entrada.url) medias.push(proxifyMediaUrl(baseUrl, meta.entrada.url));
       if (meta.salida.url) medias.push(proxifyMediaUrl(baseUrl, meta.salida.url));
+      if (!medias.length) return `📭 No hay fotos de asistencia para ${tn}.`;
+
       const caption =
         `📷 *Asistencia* – ${tn}\n` +
-        (meta.entrada.fecha_hora ? `🟢 Entrada: ${meta.entrada.fecha_hora}\n` : "") +
-        (meta.salida.fecha_hora ? `🔴 Salida: ${meta.salida.fecha_hora}\n` : "");
-      if (!medias.length) return `📭 No hay fotos de asistencia para ${tn}.`;
+        (meta.entrada.fecha_hora ? `🟢 Entrada: ${fmtDateTimeTZ(meta.entrada.fecha_hora)}\n` : "") +
+        (meta.salida.fecha_hora ? `🔴 Salida: ${fmtDateTimeTZ(meta.salida.fecha_hora)}\n` : "");
+
       return { text: caption, mediaUrl: medias };
     }
     return "Comando: `fotos N` o `menu`.";
   }
 
+  // --- CAMBIAR FOTO (foto -> ubicación)
   if (estado === STATE_ASIS_CAMBIAR_FOTO) {
-    // fuera de alcance por ahora (si quieres lo reactivamos)
+    if (data.paso === "FOTO") {
+      const numMedia = safeInt(inbound?.NumMedia || "0", 0);
+      if (numMedia < 1) return "Necesito la nueva foto.";
+      const newUrl = inbound?.MediaUrl0 || "";
+      await setSession(telefono, STATE_ASIS_CAMBIAR_FOTO, { ...data, paso: "UBI", newUrl });
+      return "✅ Foto recibida.\n📍 Comparte ubicación (para guardar lat/lon).";
+    }
+    const lat = inbound?.Latitude || inbound?.Latitude0 || "";
+    const lon = inbound?.Longitude || inbound?.Longitude0 || "";
+    if (!lat || !lon) return "Necesito tu ubicación (Share location).";
+
+    await registrarEvidencia({
+      evidencia_id: `EV-${Date.now()}-1`,
+      telefono,
+      tipo_evento: data.tipo_evento,
+      origen: "ASISTENCIA",
+      visita_id: data.visita_id,
+      url_foto: data.newUrl,
+      lat, lon,
+      tipo_evidencia: "ASISTENCIA",
+      descripcion: `[CORRECCION_${data.tipo_evento}]`,
+    });
+
     await setSession(telefono, STATE_MENU, {});
-    return menuPromotor();
+    return `✅ Foto actualizada (${data.tipo_evento}) – *${data.tienda_nombre}*\n\n` + menuPromotor();
   }
 
   await setSession(telefono, STATE_MENU, {});
@@ -809,7 +986,7 @@ async function handleAsistencia(telefono, estado, text, data, inbound, baseUrl) 
 }
 
 // ==========================
-// Evidencias (conteo estable)
+// EVIDENCIAS (captura)
 // ==========================
 async function startEvidencias(telefono) {
   const prom = await getPromotorPorTelefono(telefono);
@@ -826,6 +1003,7 @@ async function startEvidencias(telefono) {
       tienda_nombre: tiendaMap[v.tienda_id]?.nombre_tienda || v.tienda_id,
     }));
     await setSession(telefono, STATE_EVID_PICK_VISITA, { promotor_id: prom.promotor_id, opciones });
+
     let msg = "🏬 Tienes *varias tiendas activas*. Elige una:\n\n";
     opciones.slice(0,10).forEach((o,i) => msg += `*${nEmoji(i)}* ${o.tienda_nombre}\n`);
     msg += "\nResponde con número.";
@@ -881,7 +1059,12 @@ async function handleEvidencias(telefono, estado, text, data, inbound) {
     const reglas = await getReglasPorMarca(marca.marca_id);
     if (!reglas.length) return `⚠️ No hay reglas activas para ${marca.marca_nombre}.`;
 
-    await setSession(telefono, STATE_EVID_PICK_TIPO, { ...data, marca_id: marca.marca_id, marca_nombre: marca.marca_nombre, reglas });
+    await setSession(telefono, STATE_EVID_PICK_TIPO, {
+      ...data,
+      marca_id: marca.marca_id,
+      marca_nombre: marca.marca_nombre,
+      reglas,
+    });
 
     let msg = `🏷️ Marca: *${marca.marca_nombre}*\n\n🧾 Tipo de evidencia:\n\n`;
     reglas.slice(0,10).forEach((r,i) => msg += `*${nEmoji(i)}* ${r.tipo_evidencia} (fotos: ${r.fotos_requeridas}${r.requiere_antes_despues ? ", antes/después" : ""})\n`);
@@ -964,7 +1147,7 @@ async function handleEvidencias(telefono, estado, text, data, inbound) {
 }
 
 // ==========================
-// Mis evidencias (por tienda + conteo + ver todas en múltiples mensajes)
+// MIS EVIDENCIAS (por tienda, con conteo, ver todas)
 // ==========================
 async function startMisEvidencias(telefono, baseUrl) {
   const prom = await getPromotorPorTelefono(telefono);
@@ -974,17 +1157,21 @@ async function startMisEvidencias(telefono, baseUrl) {
   const visitas = await getVisitsToday(prom.promotor_id);
   if (!visitas.length) return "📭 Hoy no tienes visitas registradas.";
 
-  // conteo de evidencias por tienda (vía visita_id -> tienda)
-  const rows = await getSheetValues("EVIDENCIAS!A2:Q");
-  const hoy = todayISO();
   const visitaToTienda = {};
   visitas.forEach(v => visitaToTienda[v.visita_id] = v.tienda_id);
+
+  const rows = await getSheetValues("EVIDENCIAS!A2:Q");
+  const hoy = todayISO();
 
   const countByTienda = {};
   for (const r of rows) {
     if (norm(r[1]) !== telefono) continue;
-    if (!norm(r[2]) || norm(r[2]).slice(0,10) !== hoy) continue;
+    const fh = norm(r[2]);
+    if (!fh) continue;
+    const ymd = ymdInTZ(new Date(fh), APP_TZ);
+    if (ymd !== hoy) continue;
     if (upper(r[4]) !== "EVIDENCIA") continue;
+
     const visita_id = norm(r[6]);
     const tid = visitaToTienda[visita_id] || "SIN_TIENDA";
     countByTienda[tid] = (countByTienda[tid] || 0) + 1;
@@ -998,7 +1185,7 @@ async function startMisEvidencias(telefono, baseUrl) {
 
   await setSession(telefono, STATE_MY_EVID_PICK_TIENDA, { promotor_id: prom.promotor_id, tiendasHoy });
 
-  let msg = "📚 *Mis evidencias (hoy) – por tienda*\n\n";
+  let msg = `📚 *Mis evidencias* (${hoy}) – por tienda\n\n`;
   tiendasHoy.slice(0,10).forEach((t,i) => {
     msg += `*${nEmoji(i)}* ${t.tienda_nombre} (${t.fotos_hoy})\n`;
   });
@@ -1021,25 +1208,32 @@ async function handleMisEvidencias(telefono, estado, text, data, inbound, baseUr
 
     const rows = await getSheetValues("EVIDENCIAS!A2:Q");
     const hoy = todayISO();
+
     const list = rows
-      .filter(r =>
-        norm(r[1]) === telefono &&
-        norm(r[2]) && norm(r[2]).slice(0,10) === hoy &&
-        upper(r[4]) === "EVIDENCIA" &&
-        visitasT.includes(norm(r[6]))
-      )
+      .filter(r => {
+        if (norm(r[1]) !== telefono) return false;
+        const fh = norm(r[2]);
+        if (!fh) return false;
+        if (ymdInTZ(new Date(fh), APP_TZ) !== hoy) return false;
+        if (upper(r[4]) !== "EVIDENCIA") return false;
+        if (!visitasT.includes(norm(r[6]))) return false;
+        return true;
+      })
       .map(r => ({
         tipo_evento: norm(r[3]),
         url_foto: norm(r[7]),
         riesgo: upper(r[12] || "BAJO"),
+        fecha_hora: norm(r[2]),
       }));
 
     if (!list.length) return `📭 No hay evidencias hoy en *${tiendaSel.tienda_nombre}*.`;
 
     await setSession(telefono, STATE_MY_EVID_LIST, { tiendaSel, list });
 
-    let msg = `📷 *Evidencias – ${tiendaSel.tienda_nombre}*\n\n`;
-    list.slice(0, 20).forEach((e,i) => msg += `*${nEmoji(i)}* ${e.tipo_evento} – ${e.riesgo}\n`);
+    let msg = `📷 *Evidencias – ${tiendaSel.tienda_nombre}* (${list.length})\n\n`;
+    list.slice(0, 20).forEach((e,i) => {
+      msg += `*${nEmoji(i)}* ${e.tipo_evento} – ${e.riesgo}\n`;
+    });
     msg += "\nComandos:\n• `ver 3`\n• `ver todas`\n• `menu`";
     return msg;
   }
@@ -1051,7 +1245,7 @@ async function handleMisEvidencias(telefono, estado, text, data, inbound, baseUr
       const urls = list.map(x => x.url_foto).filter(Boolean).slice(0, 20);
       if (!urls.length) return "📭 No hay fotos para mostrar.";
 
-      // En WhatsApp por TwiML: 1 media por mensaje suele ser lo más estable.
+      // En WhatsApp/TwiML: 1 media por mensaje es lo más estable.
       const msgs = urls.map((u, i) => ({
         text: `📷 ${data.tiendaSel?.tienda_nombre || ""} – ${i + 1}/${urls.length}`,
         mediaUrl: proxifyMediaUrl(baseUrl, u),
@@ -1065,7 +1259,12 @@ async function handleMisEvidencias(telefono, estado, text, data, inbound, baseUr
       const idx = safeInt(m[1], 0) - 1;
       if (idx < 0 || idx >= list.length) return "⚠️ Número inválido.";
       const e = list[idx];
-      return { text: `📷 Evidencia #${idx+1}\n🧾 ${e.tipo_evento}\n⚠️ ${e.riesgo}`, mediaUrl: proxifyMediaUrl(baseUrl, e.url_foto) };
+      const caption =
+        `📷 Evidencia #${idx+1}\n` +
+        `🧾 ${e.tipo_evento}\n` +
+        `⚠️ ${e.riesgo}\n` +
+        (e.fecha_hora ? `📅 ${fmtDateTimeTZ(e.fecha_hora)}\n` : "");
+      return { text: caption, mediaUrl: proxifyMediaUrl(baseUrl, e.url_foto) };
     }
 
     return "Usa `ver N`, `ver todas` o `menu`.";
@@ -1073,6 +1272,179 @@ async function handleMisEvidencias(telefono, estado, text, data, inbound, baseUr
 
   await setSession(telefono, STATE_MENU, {});
   return menuPromotor();
+}
+
+// ==========================
+// SUPERVISOR (mínimo funcional)
+// ==========================
+async function getEvidenciasHoyForSupervisor() {
+  const rows = await getSheetValues("EVIDENCIAS!A2:Q");
+  const hoy = todayISO();
+  return rows
+    .filter(r => {
+      const fh = norm(r[2]);
+      if (!fh) return false;
+      if (ymdInTZ(new Date(fh), APP_TZ) !== hoy) return false;
+      return upper(r[4]) === "EVIDENCIA";
+    })
+    .map(r => ({
+      evidencia_id: norm(r[0]),
+      telefono: norm(r[1]),
+      fecha_hora: norm(r[2]),
+      tipo_evento: norm(r[3]),
+      url_foto: norm(r[7]),
+      riesgo: upper(r[12] || "BAJO"),
+    }));
+}
+
+async function enviarFotoAGrupoCliente(ev, grupo) {
+  if (!twilioClient || !TWILIO_WHATSAPP_FROM) return { ok: false, enviados: 0 };
+  let enviados = 0;
+
+  for (const to of grupo.telefonos) {
+    try {
+      await twilioClient.messages.create({
+        from: TWILIO_WHATSAPP_FROM,
+        to,
+        body: `🏪 Evidencia\n⚠️ ${ev.riesgo}\n🧾 ${ev.tipo_evento}\n📅 ${fmtDateTimeTZ(ev.fecha_hora)}`,
+        mediaUrl: ev.url_foto ? [ev.url_foto] : undefined,
+      });
+      enviados++;
+    } catch (e) {
+      console.error("send to client failed:", to, e?.message || e);
+    }
+  }
+
+  return { ok: enviados > 0, enviados };
+}
+
+async function handleSupervisor(telefono, estado, text, data, baseUrl) {
+  const lower = norm(text).toLowerCase();
+  const sup = await getSupervisorPorTelefono(telefono);
+  if (!sup) { await setSession(telefono, STATE_MENU, {}); return "⚠️ No eres supervisor activo."; }
+
+  if (lower === "menu") { await setSession(telefono, STATE_MENU, {}); return menuPromotor(); }
+  if (lower === "ayuda") return ayudaSupervisor();
+  if (lower === "sup") { await setSession(telefono, STATE_SUP_MENU, {}); return menuSupervisor(sup.nombre || "Supervisor"); }
+
+  if (estado === STATE_SUP_MENU) {
+    if (lower === "1") {
+      const equipo = await getPromotoresDeSupervisor(telefono);
+      const evs = await getEvidenciasHoyForSupervisor();
+      const counts = {};
+      evs.forEach(e => counts[e.telefono] = (counts[e.telefono] || 0) + 1);
+
+      let msg = `👀 *Evidencias hoy por promotor* (${todayISO()})\n\n`;
+      equipo.slice(0,10).forEach((p, idx) => msg += `*${nEmoji(idx)}* ${p.nombre} – ${(counts[p.telefono] || 0)}\n`);
+      msg += "\nResponde con el número del promotor.";
+      await setSession(telefono, STATE_SUP_PROMOTOR_LIST, { equipo });
+      return msg;
+    }
+
+    if (lower === "2") {
+      const equipo = await getPromotoresDeSupervisor(telefono);
+      const telSet = new Set(equipo.map(p => p.telefono));
+      const telName = {};
+      equipo.forEach(p => telName[p.telefono] = p.nombre);
+
+      const evs = (await getEvidenciasHoyForSupervisor())
+        .filter(e => telSet.has(e.telefono) && (e.riesgo === "MEDIO" || e.riesgo === "ALTO"))
+        .map(e => ({ ...e, promotor_nombre: telName[e.telefono] || e.telefono }));
+
+      if (!evs.length) return "🧠📸 No hay evidencias MEDIO/ALTO hoy.";
+
+      let msg = "🧠📸 *MEDIO/ALTO (hoy)*\n\n";
+      evs.slice(0,20).forEach((e,i) => msg += `*${nEmoji(i)}* ${e.tipo_evento} – ${e.promotor_nombre} – ${e.riesgo}\n`);
+      msg += "\nComandos: `ver 2`, `enviar 1,3`, `enviar todas`, `sup`";
+      await setSession(telefono, STATE_SUP_FOTOS_LIST, { listado: evs });
+      return msg;
+    }
+
+    if (lower === "3") return ayudaSupervisor();
+    return menuSupervisor(sup.nombre || "Supervisor");
+  }
+
+  if (estado === STATE_SUP_PROMOTOR_LIST) {
+    const equipo = data.equipo || [];
+    const idx = safeInt(text, -1) - 1;
+    if (idx < 0 || idx >= equipo.length) return "⚠️ Número inválido.";
+    const p = equipo[idx];
+
+    const evs = (await getEvidenciasHoyForSupervisor())
+      .filter(e => e.telefono === p.telefono)
+      .map(e => ({ ...e, promotor_nombre: p.nombre }));
+
+    if (!evs.length) { await setSession(telefono, STATE_SUP_MENU, {}); return `⚠️ No hay evidencias hoy para ${p.nombre}.\n\n` + menuSupervisor(sup.nombre); }
+
+    let msg = `📷 *Evidencias – ${p.nombre}*\n\n`;
+    evs.slice(0, 20).forEach((e,i) => msg += `*${nEmoji(i)}* ${e.tipo_evento} – ${e.riesgo}\n`);
+    msg += "\nComandos: `ver 1`, `enviar 1,3`, `enviar todas`, `sup`";
+    await setSession(telefono, STATE_SUP_FOTOS_LIST, { listado: evs });
+    return msg;
+  }
+
+  if (estado === STATE_SUP_FOTOS_LIST) {
+    const listado = data.listado || [];
+
+    const verMatch = lower.match(/^ver\s+(\d+)/);
+    if (verMatch) {
+      const idx = safeInt(verMatch[1], 0) - 1;
+      if (idx < 0 || idx >= listado.length) return "⚠️ Número inválido.";
+      const e = listado[idx];
+      return {
+        text: `📷 Evidencia #${idx+1}\n🧾 ${e.tipo_evento}\n⚠️ ${e.riesgo}\n📅 ${fmtDateTimeTZ(e.fecha_hora)}`,
+        mediaUrl: proxifyMediaUrl(baseUrl, e.url_foto),
+      };
+    }
+
+    if (lower.startsWith("enviar")) {
+      let resto = lower.replace(/^enviar\s*/, "").trim();
+      let seleccionadas = [];
+
+      if (resto === "todas" || resto === "todos") {
+        seleccionadas = listado.slice();
+      } else {
+        const parts = resto.split(/[, ]+/).filter(Boolean);
+        const idxs = [];
+        for (const p of parts) {
+          const n = safeInt(p, -1);
+          if (n < 1 || n > listado.length) return "⚠️ Número fuera de rango.";
+          idxs.push(n-1);
+        }
+        seleccionadas = Array.from(new Set(idxs)).map(i => listado[i]);
+      }
+
+      const grupos = await getGruposClienteActivos();
+      if (!grupos.length) return "⚠️ No hay grupos activos en GRUPOS_CLIENTE.";
+
+      let msg = `📤 Enviarás *${seleccionadas.length}* evidencia(s).\n\nElige grupo:\n`;
+      grupos.slice(0,10).forEach((g,i) => msg += `*${nEmoji(i)}* ${g.nombre_grupo}\n`);
+      msg += "\nResponde con número.";
+      await setSession(telefono, STATE_SUP_ELEGIR_GRUPO, { seleccionadas, grupos });
+      return msg;
+    }
+
+    return "Usa `ver N`, `enviar 1,3`, `enviar todas` o `sup`.";
+  }
+
+  if (estado === STATE_SUP_ELEGIR_GRUPO) {
+    const grupos = data.grupos || [];
+    const idx = safeInt(text, -1) - 1;
+    if (idx < 0 || idx >= grupos.length) return "⚠️ Grupo inválido.";
+    const grupo = grupos[idx];
+
+    let okCount = 0;
+    for (const ev of (data.seleccionadas || [])) {
+      const r = await enviarFotoAGrupoCliente(ev, grupo);
+      if (r.ok) okCount++;
+    }
+
+    await setSession(telefono, STATE_SUP_MENU, {});
+    return `✅ Enviadas ${okCount} evidencia(s) a *${grupo.nombre_grupo}*.\n\n` + menuSupervisor(sup.nombre || "Supervisor");
+  }
+
+  await setSession(telefono, STATE_SUP_MENU, {});
+  return menuSupervisor(sup.nombre || "Supervisor");
 }
 
 // ==========================
@@ -1086,14 +1458,17 @@ async function handleIncoming(from, body, inbound, baseUrl) {
   const msgSid = norm(inbound?.MessageSid || "");
   const ses = await getSession(telefono);
 
+  // Idempotencia (retry)
   if (msgSid && ses.data_json?._last_sid === msgSid && ses.data_json?._last_resp) {
     return ses.data_json._last_resp;
   }
 
+  // global commands
   if (lower === "menu" || lower === "inicio") {
     await setSession(telefono, STATE_MENU, {});
     return menuPromotor();
   }
+
   if (lower === "ayuda" || lower === "help" || lower === "?") {
     await setSession(telefono, STATE_MENU, {});
     return ayudaPromotor();
@@ -1109,6 +1484,12 @@ async function handleIncoming(from, body, inbound, baseUrl) {
   const estado = ses.estado_actual;
   const data = ses.data_json || {};
 
+  // Supervisor
+  if ([STATE_SUP_MENU, STATE_SUP_PROMOTOR_LIST, STATE_SUP_FOTOS_LIST, STATE_SUP_ELEGIR_GRUPO].includes(estado)) {
+    return await handleSupervisor(telefono, estado, text, data, baseUrl);
+  }
+
+  // Menu principal
   if (estado === STATE_MENU) {
     if (lower === "1") { await setSession(telefono, STATE_ASIS_HOME, {}); return await startAsistenciaHome(telefono); }
     if (lower === "2") { return await startEvidencias(telefono); }
@@ -1118,17 +1499,17 @@ async function handleIncoming(from, body, inbound, baseUrl) {
     return menuPromotor();
   }
 
-  // Asistencia
+  // Asistencia flow
   if ([STATE_ASIS_HOME, STATE_ASIS_PICK_ENTRADA, STATE_ASIS_PICK_ACTIVA, STATE_ASIS_ACTIVA_MENU, STATE_ASIS_FOTO, STATE_ASIS_UBI, STATE_ASIS_HIST, STATE_ASIS_CAMBIAR_FOTO].includes(estado)) {
     return await handleAsistencia(telefono, estado, text, data, inbound, baseUrl);
   }
 
-  // Evidencias
+  // Evidencias flow
   if ([STATE_EVID_PICK_VISITA, STATE_EVID_PICK_MARCA, STATE_EVID_PICK_TIPO, STATE_EVID_PICK_FASE, STATE_EVID_FOTOS].includes(estado)) {
     return await handleEvidencias(telefono, estado, text, data, inbound);
   }
 
-  // Mis evidencias
+  // Mis evidencias flow
   if ([STATE_MY_EVID_PICK_TIENDA, STATE_MY_EVID_LIST].includes(estado)) {
     return await handleMisEvidencias(telefono, estado, text, data, inbound, baseUrl);
   }
@@ -1151,6 +1532,7 @@ app.post("/whatsapp", async (req, res) => {
       respuesta = "Ocurrió un error procesando tu mensaje. Intenta de nuevo 🙏";
     }
 
+    // guardar meta idempotencia (texto)
     const sid = norm(req.body.MessageSid || "");
     if (sid) {
       const respText =
@@ -1166,11 +1548,11 @@ app.post("/whatsapp", async (req, res) => {
       twiml.message(respuesta);
     } else if (respuesta && typeof respuesta === "object") {
       if (respuesta.messages && Array.isArray(respuesta.messages)) {
+        // multi mensajes (ver todas)
         for (const m of respuesta.messages) {
           const msg = twiml.message(m.text || "");
           if (m.mediaUrl) msg.media(m.mediaUrl);
           if (m.mediaUrls && Array.isArray(m.mediaUrls)) {
-            // fallback (por si en futuro quieres varios)
             m.mediaUrls.filter(Boolean).forEach(u => msg.media(u));
           }
         }
