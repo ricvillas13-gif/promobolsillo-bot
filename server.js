@@ -26,7 +26,6 @@ const MEDIA_TTL = parseInt(MEDIA_PROXY_TTL_SECONDS || "3600", 10);
 const APP_TZ = "America/Mexico_City";
 
 function ymdInTZ(date = new Date(), tz = APP_TZ) {
-  // 'sv-SE' => YYYY-MM-DD
   return new Intl.DateTimeFormat("sv-SE", {
     timeZone: tz,
     year: "numeric",
@@ -75,7 +74,7 @@ app.use(bodyParser.json());
 const MessagingResponse = twilio.twiml.MessagingResponse;
 
 // ==========================
-// LOCK por usuario (evita concurrencia)
+// LOCK por usuario
 // ==========================
 const userLocks = new Map();
 async function withUserLock(key, fn) {
@@ -153,14 +152,12 @@ function safeInt(v, def = 0) {
   const n = parseInt(v, 10);
   return Number.isNaN(n) ? def : n;
 }
-
 function buildBaseUrl(req) {
   if (PUBLIC_BASE_URL) return PUBLIC_BASE_URL.replace(/\/+$/, "");
   const proto = (req.headers["x-forwarded-proto"] || "https").toString();
   const host = (req.headers["x-forwarded-host"] || req.headers.host || "").toString();
   return `${proto}://${host}`.replace(/\/+$/, "");
 }
-
 function nEmoji(i) {
   const arr = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"];
   return arr[i] || `${i + 1})`;
@@ -174,7 +171,6 @@ function signMedia(u, exp) {
   h.update(`${u}|${exp}`);
   return h.digest("hex");
 }
-
 function proxifyMediaUrl(baseUrl, originalUrl) {
   if (!originalUrl) return "";
   const exp = Math.floor(Date.now() / 1000) + MEDIA_TTL;
@@ -227,7 +223,7 @@ const STATE_ASIS_ACTIVA_MENU = "ASIS_ACTIVA_MENU";
 const STATE_ASIS_FOTO = "ASIS_FOTO";
 const STATE_ASIS_UBI = "ASIS_UBI";
 const STATE_ASIS_HIST = "ASIS_HIST";
-const STATE_ASIS_CAMBIAR_FOTO = "ASIS_CAMBIAR_FOTO";
+const STATE_ASIS_CAMBIAR_FOTO = "ASIS_CAMBIAR_FOTO"; // foto -> ubi
 
 // Evidencias
 const STATE_EVID_PICK_VISITA = "EVID_PICK_VISITA";
@@ -235,10 +231,12 @@ const STATE_EVID_PICK_MARCA = "EVID_PICK_MARCA";
 const STATE_EVID_PICK_TIPO = "EVID_PICK_TIPO";
 const STATE_EVID_PICK_FASE = "EVID_PICK_FASE";
 const STATE_EVID_FOTOS = "EVID_FOTOS";
+const STATE_EVID_POST = "EVID_POST"; // menú post-evidencia
 
 // Mis evidencias
 const STATE_MY_EVID_PICK_TIENDA = "MY_EVID_PICK_TIENDA";
 const STATE_MY_EVID_LIST = "MY_EVID_LIST";
+const STATE_MY_EVID_REPLACE = "MY_EVID_REPLACE"; // reemplazar -> pedir foto
 
 // Supervisor
 const STATE_SUP_MENU = "SUP_MENU";
@@ -247,7 +245,7 @@ const STATE_SUP_FOTOS_LIST = "SUP_FOTOS_LIST";
 const STATE_SUP_ELEGIR_GRUPO = "SUP_ELEGIR_GRUPO";
 
 // ==========================
-// SESIONES (SESIONES A:telefono B:estado C:data_json)
+// SESIONES
 // ==========================
 async function findSessionRow(telefono) {
   const rows = await getSheetValues("SESIONES!A2:C");
@@ -295,7 +293,7 @@ async function setSessionMeta(telefono, meta) {
 }
 
 // ==========================
-// Catálogos (PROMOTORES, SUPERVISORES, TIENDAS, ASIGNACIONES)
+// Catálogos
 // ==========================
 async function getSupervisorPorTelefono(telefono) {
   const rows = await getSheetValues("SUPERVISORES!A2:F");
@@ -382,8 +380,8 @@ async function getOpenVisitsToday(promotor_id) {
   return visits.filter(v => !v.hora_fin).map(v => ({ visita_id: v.visita_id, tienda_id: v.tienda_id }));
 }
 
+// historial real: últimas 10 (todas las fechas)
 async function getLastVisits(promotor_id, limit = 10) {
-  // 👈 FIX PRINCIPAL: historial NO depende de "hoy"
   const rows = await getSheetValues("VISITAS!A2:F");
   const visits = rows
     .filter(r => norm(r[1]) === promotor_id)
@@ -395,7 +393,6 @@ async function getLastVisits(promotor_id, limit = 10) {
       hora_inicio: norm(r[4]),
       hora_fin: norm(r[5]),
     }));
-
   visits.sort((a, b) => (b.hora_inicio || "").localeCompare(a.hora_inicio || ""));
   return visits.slice(0, limit);
 }
@@ -476,6 +473,15 @@ function demoAnalisis(tipo_evento) {
   return { resultado_ai: "Evidencia coherente (demo).", score: 0.90, riesgo: "BAJO" };
 }
 
+function tagAppend(desc, tag) {
+  const d = norm(desc);
+  if (!d) return tag;
+  return d.includes(tag) ? d : `${d} | ${tag}`;
+}
+function makeStatusTag(k, v) {
+  return `${k}=${(v || "").toString().replace(/\|/g, "/")}`;
+}
+
 async function registrarEvidencia(payload) {
   const a = demoAnalisis(payload.tipo_evento);
   await appendSheetValues("EVIDENCIAS!A2:Q", [[
@@ -498,6 +504,29 @@ async function registrarEvidencia(payload) {
     payload.descripcion || "",
   ]]);
   return a;
+}
+
+async function findEvidenciaRowById(evidencia_id) {
+  const rows = await getSheetValues("EVIDENCIAS!A2:Q");
+  for (let i = 0; i < rows.length; i++) {
+    if (norm(rows[i][0]) === evidencia_id) {
+      return { rowIndex: i + 2, row: rows[i] };
+    }
+  }
+  return null;
+}
+
+async function updateEvidenciaDescripcion(evidencia_id, patchText) {
+  const found = await findEvidenciaRowById(evidencia_id);
+  if (!found) return false;
+  const currentDesc = norm(found.row[16] || "");
+  const nextDesc = tagAppend(currentDesc, patchText);
+  await updateSheetValues(`EVIDENCIAS!Q${found.rowIndex}:Q${found.rowIndex}`, [[nextDesc]]);
+  return true;
+}
+
+function isEvidenciaCancelada(desc) {
+  return upper(desc).includes("STATUS=ANULADA") || upper(desc).includes("STATUS=REEMPLAZADA");
 }
 
 async function hasAsistenciaEvento(visita_id, tipo_evento) {
@@ -528,7 +557,6 @@ async function getAsistenciaMetaByVisita(visita_id) {
       if (!salida.fecha_hora || fh > salida.fecha_hora) salida = { url, fecha_hora: fh };
     }
   }
-
   return { entrada, salida };
 }
 
@@ -561,17 +589,19 @@ function menuPromotor() {
     "Comandos: `menu`, `sup`, `ayuda`"
   );
 }
-
 function ayudaPromotor() {
   return (
     "🆘 *Ayuda*\n\n" +
-    "• Asistencia: si NO hay tienda activa, te ofrece ENTRADA.\n" +
-    "• Evidencias: manda fotos según regla (puedes mandar varias juntas).\n" +
-    "• Mis evidencias: elige tienda y usa `ver N` o `ver todas`.\n\n" +
+    "• Evidencias: la regla (ej. 5 fotos) es *mínimo por tanda*. Puedes hacer otra tanda.\n" +
+    "• Mis evidencias:\n" +
+    "  - `ver 3`\n" +
+    "  - `ver todas`\n" +
+    "  - `anular 3 motivo`\n" +
+    "  - `reemplazar 2`\n" +
+    "  - `nota 4 texto...`\n\n" +
     "Escribe `menu` para volver."
   );
 }
-
 function menuSupervisor(nombre="Supervisor") {
   return (
     `👋 *${nombre}* (Supervisor)\n\n` +
@@ -580,7 +610,6 @@ function menuSupervisor(nombre="Supervisor") {
     `*${nEmoji(2)}* Ayuda\n`
   );
 }
-
 function ayudaSupervisor() {
   return (
     "🆘 *Ayuda Supervisor*\n\n" +
@@ -630,7 +659,7 @@ async function resumenDia(telefono) {
 // ==========================
 // ASISTENCIA
 // ==========================
-async function buildHistorial(telefono, promotor_id) {
+async function buildHistorial(promotor_id) {
   const tiendaMap = await getTiendaMap();
   const out = await getLastVisits(promotor_id, 10);
 
@@ -721,7 +750,7 @@ async function handleAsistencia(telefono, estado, text, data, inbound, baseUrl) 
     }
 
     if (lower === "2") {
-      const { listado, msg } = await buildHistorial(telefono, prom.promotor_id);
+      const { listado, msg } = await buildHistorial(prom.promotor_id);
       await setSession(telefono, STATE_ASIS_HIST, { listado });
       return msg;
     }
@@ -813,12 +842,10 @@ async function handleAsistencia(telefono, estado, text, data, inbound, baseUrl) 
     if (lower === "5") return await startAsistenciaHome(telefono);
 
     if (lower === "6") {
-      const { listado, msg } = await buildHistorial(telefono, prom.promotor_id);
+      const { listado, msg } = await buildHistorial(prom.promotor_id);
       await setSession(telefono, STATE_ASIS_HIST, { listado });
       return msg;
     }
-
-    if (lower === "7") { await setSession(telefono, STATE_MENU, {}); return menuPromotor(); }
 
     return "Responde con una opción del menú.";
   }
@@ -913,8 +940,10 @@ async function handleAsistencia(telefono, estado, text, data, inbound, baseUrl) 
 
   if (estado === STATE_ASIS_HIST) {
     const listado = data.listado || [];
-    if (lower.startsWith("fotos")) {
-      const idx = safeInt(lower.replace("fotos", "").trim(), -1) - 1;
+    const cmd = lower.trim();
+
+    if (cmd.startsWith("fotos")) {
+      const idx = safeInt(cmd.replace("fotos", "").trim(), -1) - 1;
       if (idx < 0 || idx >= listado.length) return "⚠️ Usa `fotos 1`..";
       const v = listado[idx];
       const tn = tiendaMap[v.tienda_id]?.nombre_tienda || v.tienda_id;
@@ -932,6 +961,7 @@ async function handleAsistencia(telefono, estado, text, data, inbound, baseUrl) 
 
       return { text: caption, mediaUrl: medias };
     }
+
     return "Comando: `fotos N` o `menu`.";
   }
 
@@ -968,7 +998,7 @@ async function handleAsistencia(telefono, estado, text, data, inbound, baseUrl) 
 }
 
 // ==========================
-// EVIDENCIAS (captura)
+// EVIDENCIAS (captura) + POST MENU
 // ==========================
 async function startEvidencias(telefono) {
   const prom = await getPromotorPorTelefono(telefono);
@@ -1009,8 +1039,54 @@ async function startEvidencias(telefono) {
   return msg;
 }
 
+function postEvidMenu(ctx) {
+  return (
+    "✅ Evidencia completada.\n\n" +
+    `🏬 ${ctx.tienda_nombre}\n` +
+    `🏷️ ${ctx.marca_nombre}\n` +
+    `🧾 ${ctx.tipo_evidencia}\n\n` +
+    `*${nEmoji(0)}* Nueva evidencia (misma marca + mismo tipo)\n` +
+    `*${nEmoji(1)}* Nueva evidencia (misma marca, otro tipo)\n` +
+    `*${nEmoji(2)}* Cambiar marca\n` +
+    `*${nEmoji(3)}* Menú\n`
+  );
+}
+
 async function handleEvidencias(telefono, estado, text, data, inbound) {
   const lower = norm(text).toLowerCase();
+
+  if (estado === STATE_EVID_POST) {
+    if (lower === "1") {
+      const regla = data.regla;
+      await setSession(telefono, STATE_EVID_FOTOS, {
+        ...data,
+        fotos_requeridas: regla.fotos_requeridas,
+        fotos_recibidas: 0,
+      });
+      return `📸 Envía *${regla.fotos_requeridas}* foto(s). (Nueva tanda)`;
+    }
+    if (lower === "2") {
+      // mismo marca, lista tipos
+      const reglas = await getReglasPorMarca(data.marca_id);
+      await setSession(telefono, STATE_EVID_PICK_TIPO, { ...data, reglas });
+      let msg = `🧾 Marca: *${data.marca_nombre}*\n\nTipo de evidencia:\n\n`;
+      reglas.slice(0,10).forEach((r,i) =>
+        msg += `*${nEmoji(i)}* ${r.tipo_evidencia} (fotos: ${r.fotos_requeridas}${r.requiere_antes_despues ? ", antes/después" : ""})\n`
+      );
+      msg += "\nResponde con número.";
+      return msg;
+    }
+    if (lower === "3") {
+      const marcas = await getMarcasActivas();
+      await setSession(telefono, STATE_EVID_PICK_MARCA, { ...data, marcas });
+      let msg = `🏬 *${data.tienda_nombre}*\n🏷️ Selecciona marca:\n\n`;
+      marcas.slice(0,10).forEach((m,i) => msg += `*${nEmoji(i)}* ${m.marca_nombre}\n`);
+      msg += "\nResponde con número.";
+      return msg;
+    }
+    await setSession(telefono, STATE_MENU, {});
+    return menuPromotor();
+  }
 
   if (estado === STATE_EVID_PICK_VISITA) {
     const opciones = data.opciones || [];
@@ -1067,14 +1143,25 @@ async function handleEvidencias(telefono, estado, text, data, inbound) {
       return `🧾 *${regla.tipo_evidencia}*\n\n*${nEmoji(0)}* ANTES\n*${nEmoji(1)}* DESPUÉS`;
     }
 
-    await setSession(telefono, STATE_EVID_FOTOS, { ...data, regla, fotos_requeridas: regla.fotos_requeridas, fotos_recibidas: 0 });
+    await setSession(telefono, STATE_EVID_FOTOS, {
+      ...data,
+      regla,
+      fase: "NA",
+      fotos_requeridas: regla.fotos_requeridas,
+      fotos_recibidas: 0,
+    });
     return `📸 Envía *${regla.fotos_requeridas}* foto(s). (Puedes enviar varias juntas)`;
   }
 
   if (estado === STATE_EVID_PICK_FASE) {
     if (lower !== "1" && lower !== "2") return "Responde 1 o 2.";
     const fase = (lower === "1") ? "ANTES" : "DESPUES";
-    await setSession(telefono, STATE_EVID_FOTOS, { ...data, fase, fotos_requeridas: data.regla.fotos_requeridas, fotos_recibidas: 0 });
+    await setSession(telefono, STATE_EVID_FOTOS, {
+      ...data,
+      fase,
+      fotos_requeridas: data.regla.fotos_requeridas,
+      fotos_recibidas: 0,
+    });
     return `📸 Envía *${data.regla.fotos_requeridas}* foto(s) para *${fase}*.`;
   }
 
@@ -1110,7 +1197,7 @@ async function handleEvidencias(telefono, estado, text, data, inbound) {
         lat, lon,
         marca_id: data.marca_id,
         tipo_evidencia: data.regla.tipo_evidencia,
-        descripcion,
+        descripcion: descripcion ? `${descripcion}` : "",
       });
     }
 
@@ -1122,8 +1209,18 @@ async function handleEvidencias(telefono, estado, text, data, inbound) {
       return `✅ Recibí *${accepted}* foto(s)${ignored ? ` (ignoré ${ignored} extra)` : ""}.\n📌 Faltan *${faltan}*.`;
     }
 
-    await setSession(telefono, STATE_MENU, {});
-    return `✅ Evidencia completada (${needed})${ignored ? ` (ignoré ${ignored} extra)` : ""}.\n\n` + menuPromotor();
+    // terminado -> menú post
+    const ctx = {
+      tienda_nombre: data.tienda_nombre,
+      marca_id: data.marca_id,
+      marca_nombre: data.marca_nombre,
+      tipo_evidencia: data.regla.tipo_evidencia,
+      regla: data.regla,
+      visita_id: data.visita_id,
+    };
+    await setSession(telefono, STATE_EVID_POST, ctx);
+
+    return postEvidMenu(ctx) + (ignored ? `\nℹ️ Ignoré ${ignored} foto(s) extra.` : "");
   }
 
   await setSession(telefono, STATE_MENU, {});
@@ -1131,7 +1228,7 @@ async function handleEvidencias(telefono, estado, text, data, inbound) {
 }
 
 // ==========================
-// MIS EVIDENCIAS (conteo por tienda + ver todas)
+// MIS EVIDENCIAS (anular / reemplazar / nota)
 // ==========================
 async function startMisEvidencias(telefono, baseUrl) {
   const prom = await getPromotorPorTelefono(telefono);
@@ -1203,11 +1300,17 @@ async function handleMisEvidencias(telefono, estado, text, data, inbound, baseUr
         return true;
       })
       .map(r => ({
+        evidencia_id: norm(r[0]),
         tipo_evento: norm(r[3]),
         url_foto: norm(r[7]),
         riesgo: upper(r[12] || "BAJO"),
         fecha_hora: norm(r[2]),
-      }));
+        marca_id: norm(r[13]),
+        tipo_evidencia: norm(r[15]),
+        descripcion: norm(r[16]),
+        visita_id: norm(r[6]),
+      }))
+      .filter(e => !isEvidenciaCancelada(e.descripcion)); // oculta anuladas/reemplazadas por defecto
 
     if (!list.length) return `📭 No hay evidencias hoy en *${tiendaSel.tienda_nombre}*.`;
 
@@ -1217,7 +1320,16 @@ async function handleMisEvidencias(telefono, estado, text, data, inbound, baseUr
     list.slice(0, 20).forEach((e,i) => {
       msg += `*${nEmoji(i)}* ${e.tipo_evento} – ${e.riesgo}\n`;
     });
-    msg += "\nComandos:\n• `ver 3`\n• `ver todas`\n• `menu`";
+
+    msg +=
+      "\nComandos:\n" +
+      "• `ver 3`\n" +
+      "• `ver todas`\n" +
+      "• `anular 3 motivo`\n" +
+      "• `reemplazar 2`\n" +
+      "• `nota 4 texto...`\n" +
+      "• `menu`";
+
     return msg;
   }
 
@@ -1228,16 +1340,14 @@ async function handleMisEvidencias(telefono, estado, text, data, inbound, baseUr
       const urls = list.map(x => x.url_foto).filter(Boolean).slice(0, 20);
       if (!urls.length) return "📭 No hay fotos para mostrar.";
 
-      // 1 media por mensaje (WhatsApp/TwiML estable)
       const msgs = urls.map((u, i) => ({
         text: `📷 ${data.tiendaSel?.tienda_nombre || ""} – ${i + 1}/${urls.length}`,
         mediaUrl: proxifyMediaUrl(baseUrl, u),
       }));
-
       return { messages: msgs };
     }
 
-    const m = lower.match(/^ver\s+(\d+)/);
+    let m = lower.match(/^ver\s+(\d+)/);
     if (m) {
       const idx = safeInt(m[1], 0) - 1;
       if (idx < 0 || idx >= list.length) return "⚠️ Número inválido.";
@@ -1246,11 +1356,110 @@ async function handleMisEvidencias(telefono, estado, text, data, inbound, baseUr
         `📷 Evidencia #${idx+1}\n` +
         `🧾 ${e.tipo_evento}\n` +
         `⚠️ ${e.riesgo}\n` +
-        (e.fecha_hora ? `📅 ${fmtDateTimeTZ(e.fecha_hora)}\n` : "");
+        (e.fecha_hora ? `📅 ${fmtDateTimeTZ(e.fecha_hora)}\n` : "") +
+        (e.descripcion ? `📝 ${e.descripcion}\n` : "");
       return { text: caption, mediaUrl: proxifyMediaUrl(baseUrl, e.url_foto) };
     }
 
-    return "Usa `ver N`, `ver todas` o `menu`.";
+    m = lower.match(/^anular\s+(\d+)(.*)$/);
+    if (m) {
+      const idx = safeInt(m[1], 0) - 1;
+      const motivo = norm(m[2] || "").replace(/^[-:]/, "").trim();
+      if (idx < 0 || idx >= list.length) return "⚠️ Número inválido.";
+      const e = list[idx];
+
+      const ok = await updateEvidenciaDescripcion(
+        e.evidencia_id,
+        `${makeStatusTag("STATUS", "ANULADA")}${motivo ? " " + makeStatusTag("MOTIVO", motivo) : ""} ${makeStatusTag("TS", nowISO())}`
+      );
+
+      if (!ok) return "⚠️ No encontré esa evidencia en Sheets (revisa evidencia_id).";
+
+      // refresca lista quitando anulada
+      const newList = list.filter((_, i) => i !== idx);
+      await setSession(telefono, STATE_MY_EVID_LIST, { ...data, list: newList });
+
+      return `✅ Evidencia #${idx+1} anulada.${motivo ? "\n📝 Motivo: " + motivo : ""}\n\nEscribe \`menu\` o sigue con \`ver\`, \`reemplazar\`, etc.`;
+    }
+
+    m = lower.match(/^nota\s+(\d+)\s+(.+)$/);
+    if (m) {
+      const idx = safeInt(m[1], 0) - 1;
+      const nota = norm(m[2] || "");
+      if (idx < 0 || idx >= list.length) return "⚠️ Número inválido.";
+      const e = list[idx];
+
+      const ok = await updateEvidenciaDescripcion(
+        e.evidencia_id,
+        `${makeStatusTag("NOTA", nota)} ${makeStatusTag("TS", nowISO())}`
+      );
+      if (!ok) return "⚠️ No encontré esa evidencia en Sheets.";
+
+      return `✅ Nota actualizada en evidencia #${idx+1}.\nEscribe \`ver ${idx+1}\` para verla.`;
+    }
+
+    m = lower.match(/^reemplazar\s+(\d+)(.*)$/);
+    if (m) {
+      const idx = safeInt(m[1], 0) - 1;
+      const motivo = norm(m[2] || "").replace(/^[-:]/, "").trim();
+      if (idx < 0 || idx >= list.length) return "⚠️ Número inválido.";
+      const e = list[idx];
+
+      await setSession(telefono, STATE_MY_EVID_REPLACE, {
+        tiendaSel: data.tiendaSel,
+        list,
+        targetIndex: idx,
+        target: e,
+        motivo,
+      });
+
+      return `🔁 Reemplazar evidencia #${idx+1}\n📸 Envía la NUEVA foto.${motivo ? "\n📝 Motivo: " + motivo : ""}`;
+    }
+
+    return "Usa `ver N`, `ver todas`, `anular N`, `reemplazar N` o `nota N ...`.";
+  }
+
+  if (estado === STATE_MY_EVID_REPLACE) {
+    const numMedia = safeInt(inbound?.NumMedia || "0", 0);
+    if (numMedia < 1) return "Necesito que envíes una foto para reemplazar.";
+
+    const newUrl = inbound?.MediaUrl0 || "";
+    const lat = inbound?.Latitude || inbound?.Latitude0 || "";
+    const lon = inbound?.Longitude || inbound?.Longitude0 || "";
+
+    const target = data.target;
+    const motivo = norm(data.motivo || "");
+
+    // 1) crea nueva evidencia "reemplazo"
+    const newId = `EV-${Date.now()}-R`;
+
+    await registrarEvidencia({
+      evidencia_id: newId,
+      telefono,
+      tipo_evento: target.tipo_evento || "EVIDENCIA_REEMPLAZO",
+      origen: "EVIDENCIA",
+      visita_id: target.visita_id || "",
+      url_foto: newUrl,
+      lat, lon,
+      marca_id: target.marca_id || "",
+      tipo_evidencia: target.tipo_evidencia || "",
+      descripcion: `${makeStatusTag("REEMPLAZO_DE", target.evidencia_id)}${motivo ? " " + makeStatusTag("MOTIVO", motivo) : ""}`,
+    });
+
+    // 2) marca vieja como REEMPLAZADA con ref a nueva
+    await updateEvidenciaDescripcion(
+      target.evidencia_id,
+      `${makeStatusTag("STATUS", "REEMPLAZADA")} ${makeStatusTag("REF", newId)} ${makeStatusTag("TS", nowISO())}`
+    );
+
+    // 3) regresa a listado (remueve la vieja del listado en memoria)
+    const list = data.list || [];
+    const idx = safeInt(data.targetIndex, -1);
+    const newList = list.filter((_, i) => i !== idx);
+
+    await setSession(telefono, STATE_MY_EVID_LIST, { tiendaSel: data.tiendaSel, list: newList });
+
+    return `✅ Evidencia #${idx+1} reemplazada.\n🆕 Nueva evidencia creada: ${newId}\n\nTip: usa \`ver todas\` para revisar.`;
   }
 
   await setSession(telefono, STATE_MENU, {});
@@ -1268,7 +1477,10 @@ async function getEvidenciasHoyForSupervisor() {
       const fh = norm(r[2]);
       if (!fh) return false;
       if (ymdInTZ(new Date(fh), APP_TZ) !== hoy) return false;
-      return upper(r[4]) === "EVIDENCIA";
+      if (upper(r[4]) !== "EVIDENCIA") return false;
+      const desc = norm(r[16] || "");
+      if (isEvidenciaCancelada(desc)) return false;
+      return true;
     })
     .map(r => ({
       evidencia_id: norm(r[0]),
@@ -1297,7 +1509,6 @@ async function enviarFotoAGrupoCliente(ev, grupo, baseUrl) {
       console.error("send to client failed:", to, e?.message || e);
     }
   }
-
   return { ok: enviados > 0, enviados };
 }
 
@@ -1369,9 +1580,9 @@ async function handleSupervisor(telefono, estado, text, data, baseUrl) {
   if (estado === STATE_SUP_FOTOS_LIST) {
     const listado = data.listado || [];
 
-    const verMatch = lower.match(/^ver\s+(\d+)/);
-    if (verMatch) {
-      const idx = safeInt(verMatch[1], 0) - 1;
+    let m = lower.match(/^ver\s+(\d+)/);
+    if (m) {
+      const idx = safeInt(m[1], 0) - 1;
       if (idx < 0 || idx >= listado.length) return "⚠️ Número inválido.";
       const e = listado[idx];
       return {
@@ -1441,12 +1652,12 @@ async function handleIncoming(from, body, inbound, baseUrl) {
   const msgSid = norm(inbound?.MessageSid || "");
   const ses = await getSession(telefono);
 
-  // Idempotencia retry
+  // Idempotencia
   if (msgSid && ses.data_json?._last_sid === msgSid && ses.data_json?._last_resp) {
     return ses.data_json._last_resp;
   }
 
-  // global
+  // Global
   if (lower === "menu" || lower === "inicio") {
     await setSession(telefono, STATE_MENU, {});
     return menuPromotor();
@@ -1470,7 +1681,7 @@ async function handleIncoming(from, body, inbound, baseUrl) {
     return await handleSupervisor(telefono, estado, text, data, baseUrl);
   }
 
-  // Menu promotor
+  // Menú principal
   if (estado === STATE_MENU) {
     if (lower === "1") { await setSession(telefono, STATE_ASIS_HOME, {}); return await startAsistenciaHome(telefono); }
     if (lower === "2") { return await startEvidencias(telefono); }
@@ -1480,16 +1691,18 @@ async function handleIncoming(from, body, inbound, baseUrl) {
     return menuPromotor();
   }
 
-  // Flujos
+  // Asistencia
   if ([STATE_ASIS_HOME, STATE_ASIS_PICK_ENTRADA, STATE_ASIS_PICK_ACTIVA, STATE_ASIS_ACTIVA_MENU, STATE_ASIS_FOTO, STATE_ASIS_UBI, STATE_ASIS_HIST, STATE_ASIS_CAMBIAR_FOTO].includes(estado)) {
     return await handleAsistencia(telefono, estado, text, data, inbound, baseUrl);
   }
 
-  if ([STATE_EVID_PICK_VISITA, STATE_EVID_PICK_MARCA, STATE_EVID_PICK_TIPO, STATE_EVID_PICK_FASE, STATE_EVID_FOTOS].includes(estado)) {
+  // Evidencias
+  if ([STATE_EVID_PICK_VISITA, STATE_EVID_PICK_MARCA, STATE_EVID_PICK_TIPO, STATE_EVID_PICK_FASE, STATE_EVID_FOTOS, STATE_EVID_POST].includes(estado)) {
     return await handleEvidencias(telefono, estado, text, data, inbound);
   }
 
-  if ([STATE_MY_EVID_PICK_TIENDA, STATE_MY_EVID_LIST].includes(estado)) {
+  // Mis evidencias
+  if ([STATE_MY_EVID_PICK_TIENDA, STATE_MY_EVID_LIST, STATE_MY_EVID_REPLACE].includes(estado)) {
     return await handleMisEvidencias(telefono, estado, text, data, inbound, baseUrl);
   }
 
@@ -1514,6 +1727,7 @@ app.post("/whatsapp", async (req, res) => {
       respuesta = "Ocurrió un error procesando tu mensaje. Intenta de nuevo 🙏";
     }
 
+    // guardar meta idempotencia (texto)
     const sid = norm(req.body.MessageSid || "");
     if (sid) {
       const respText =
@@ -1529,7 +1743,6 @@ app.post("/whatsapp", async (req, res) => {
       twiml.message(respuesta);
     } else if (respuesta && typeof respuesta === "object") {
       if (respuesta.messages && Array.isArray(respuesta.messages)) {
-        // múltiples mensajes (ver todas)
         for (const m of respuesta.messages) {
           const msg = twiml.message(m.text || "");
           if (m.mediaUrl) msg.media(m.mediaUrl);
