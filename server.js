@@ -24,7 +24,6 @@ const MEDIA_TTL = parseInt(MEDIA_PROXY_TTL_SECONDS || "3600", 10);
 // TZ (CDMX)
 // ==========================
 const APP_TZ = "America/Mexico_City";
-
 function ymdInTZ(date = new Date(), tz = APP_TZ) {
   return new Intl.DateTimeFormat("sv-SE", {
     timeZone: tz,
@@ -33,7 +32,6 @@ function ymdInTZ(date = new Date(), tz = APP_TZ) {
     day: "2-digit",
   }).format(date);
 }
-
 function hmInTZ(date = new Date(), tz = APP_TZ) {
   return new Intl.DateTimeFormat("es-MX", {
     timeZone: tz,
@@ -42,18 +40,15 @@ function hmInTZ(date = new Date(), tz = APP_TZ) {
     hour12: false,
   }).format(date);
 }
-
 function fmtDateTimeTZ(iso, tz = APP_TZ) {
   if (!iso) return "";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
   return `${ymdInTZ(d, tz)} ${hmInTZ(d, tz)}`;
 }
-
 function todayISO() {
   return ymdInTZ(new Date(), APP_TZ);
 }
-
 function nowISO() {
   return new Date().toISOString();
 }
@@ -173,7 +168,6 @@ function tipsFoto() {
     "3) Toma la foto y envía ✅"
   );
 }
-
 function tipsUbicacion() {
   return (
     "📍 *Cómo enviar ubicación*\n" +
@@ -234,6 +228,7 @@ app.get("/media", async (req, res) => {
 // Estados
 // ==========================
 const STATE_MENU = "MENU";
+const STATE_MENU_EVID_PENDING = "MENU_EVID_PENDING";
 
 // Asistencia
 const STATE_ASIS_HOME = "ASIS_HOME";
@@ -258,11 +253,11 @@ const STATE_MY_EVID_PICK_TIENDA = "MY_EVID_PICK_TIENDA";
 const STATE_MY_EVID_LIST = "MY_EVID_LIST";
 const STATE_MY_EVID_REPLACE = "MY_EVID_REPLACE";
 
-// Atajo “activas”
+// Atajo activas
 const STATE_ACTIVAS_PICK = "ACTIVAS_PICK";
 const STATE_ACTIVAS_ACTION = "ACTIVAS_ACTION";
 
-// Supervisor (se mantiene, no tocamos alcance aquí)
+// Supervisor (se mantiene)
 const STATE_SUP_MENU = "SUP_MENU";
 const STATE_SUP_PROMOTOR_LIST = "SUP_PROMOTOR_LIST";
 const STATE_SUP_FOTOS_LIST = "SUP_FOTOS_LIST";
@@ -272,13 +267,11 @@ const STATE_SUP_ELEGIR_GRUPO = "SUP_ELEGIR_GRUPO";
 // SESIONES (SESIONES A:telefono B:estado C:data_json)
 // ==========================
 function mergePersist(prev, next) {
-  // Persistimos pending evidence aunque el estado se vaya a MENU
-  const persistedKeys = ["_pending_evid"];
+  const persistedKeys = ["_pending_evid", "active_visit_id", "active_tienda_id", "active_tienda_nombre"];
   const out = { ...next };
   for (const k of persistedKeys) {
     if (out[k] === undefined && prev && prev[k] !== undefined) out[k] = prev[k];
   }
-  // siempre preserva meta de idempotencia si no viene
   if (out._last_sid === undefined && prev?._last_sid) out._last_sid = prev._last_sid;
   if (out._last_resp === undefined && prev?._last_resp) out._last_resp = prev._last_resp;
   return out;
@@ -609,28 +602,16 @@ async function getAsistenciaMetaByVisita(visita_id) {
 // ==========================
 // Pending evidence (continuar)
 // ==========================
-function setPendingEvid(prevJson, pending) {
-  return { ...(prevJson || {}), _pending_evid: pending };
-}
-
-function clearPendingEvid(prevJson) {
-  const out = { ...(prevJson || {}) };
-  delete out._pending_evid;
-  return out;
-}
-
 function pendingIsFresh(p) {
   const ts = safeInt(p?.ts || 0, 0);
   if (!ts) return false;
-  const ageMs = Date.now() - ts;
-  return ageMs < 12 * 60 * 60 * 1000; // 12h
+  return (Date.now() - ts) < 12 * 60 * 60 * 1000;
 }
 
 async function resumePendingEvidence(telefono, sessionData) {
   const p = sessionData?._pending_evid;
   if (!p || !pendingIsFresh(p)) return null;
 
-  // reconstruye prompt según step
   if (p.step === "FOTOS") {
     await setSession(telefono, STATE_EVID_FOTOS, {
       ...sessionData,
@@ -642,7 +623,6 @@ async function resumePendingEvidence(telefono, sessionData) {
       fase: p.fase || "NA",
       fotos_requeridas: p.fotos_requeridas,
       fotos_recibidas: p.fotos_recibidas || 0,
-      _pending_evid: p,
     });
     const faltan = Math.max(0, (p.fotos_requeridas || 1) - (p.fotos_recibidas || 0));
     return (
@@ -650,14 +630,13 @@ async function resumePendingEvidence(telefono, sessionData) {
       `🏬 ${p.tienda_nombre}\n` +
       `🏷️ ${p.marca_nombre}\n` +
       `🧾 ${p.regla?.tipo_evidencia}\n\n` +
-      `📸 Faltan *${faltan}* foto(s).\n` +
-      `${tipsFoto()}\n\n` +
-      "Envía las fotos ahora."
+      `📸 Faltan *${faltan}* foto(s).\n\n` +
+      `${tipsFoto()}\n\nEnvía las fotos ahora.`
     );
   }
 
   if (p.step === "POST") {
-    await setSession(telefono, STATE_EVID_POST, { ...sessionData, ...p, _pending_evid: p });
+    await setSession(telefono, STATE_EVID_POST, { ...sessionData, ...p });
     return (
       "⏯️ *Continuando*\n\n" +
       "Tu última evidencia ya quedó completa.\n" +
@@ -669,12 +648,11 @@ async function resumePendingEvidence(telefono, sessionData) {
     );
   }
 
-  // Si no sabemos, manda a flujo normal
   return null;
 }
 
 // ==========================
-// GRUPOS_CLIENTE (para supervisor; no tocado aquí)
+// GRUPOS_CLIENTE
 // ==========================
 async function getGruposClienteActivos() {
   const rows = await getSheetValues("GRUPOS_CLIENTE!A2:E");
@@ -689,7 +667,7 @@ async function getGruposClienteActivos() {
 }
 
 // ==========================
-// Menús promotor (dinámico si hay pendiente)
+// Menú promotor + ayuda contextual
 // ==========================
 function menuPromotor(hasPending = false) {
   const extra = hasPending ? `\n*${nEmoji(5)}* Continuar evidencia pendiente ⏯️` : "";
@@ -705,10 +683,8 @@ function menuPromotor(hasPending = false) {
   );
 }
 
-// Ayuda contextual
 function ayudaContextual(estado) {
-  // Si está esperando foto/ubicación, la ayuda cambia
-  if (estado === STATE_ASIS_FOTO || estado === STATE_EVID_FOTOS || estado === STATE_MY_EVID_REPLACE || estado === STATE_ASIS_CAMBIAR_FOTO) {
+  if ([STATE_ASIS_FOTO, STATE_EVID_FOTOS, STATE_MY_EVID_REPLACE, STATE_ASIS_CAMBIAR_FOTO].includes(estado)) {
     return "🆘 *Ayuda*\n\n" + tipsFoto() + "\n\nSi mandaste texto por error, vuelve a adjuntar la foto y envía.";
   }
   if (estado === STATE_ASIS_UBI) {
@@ -739,7 +715,7 @@ function ayudaContextual(estado) {
 }
 
 // ==========================
-// 2) Atajo "activas"
+// Atajo “activas”
 // ==========================
 async function showActivasMenu(telefono) {
   const prom = await getPromotorPorTelefono(telefono);
@@ -758,7 +734,7 @@ async function showActivasMenu(telefono) {
     tienda_nombre: tiendaMap[a.tienda_id]?.nombre_tienda || a.tienda_id,
   }));
 
-  await setSession(telefono, STATE_ACTIVAS_PICK, { promotor_id: prom.promotor_id, opciones });
+  await setSession(telefono, STATE_ACTIVAS_PICK, { opciones });
 
   let msg = "🏬 *Tiendas activas hoy*\n\nElige una:\n\n";
   opciones.slice(0, 10).forEach((o, i) => { msg += `*${nEmoji(i)}* ${o.tienda_nombre}\n`; });
@@ -775,7 +751,7 @@ async function handleActivas(telefono, estado, text, data) {
     if (idx < 0 || idx >= Math.min(10, opciones.length)) return "⚠️ Elige un número válido.";
     const sel = opciones[idx];
 
-    await setSession(telefono, STATE_ACTIVAS_ACTION, { ...data, sel });
+    await setSession(telefono, STATE_ACTIVAS_ACTION, { sel });
 
     return (
       `🏬 *${sel.tienda_nombre}*\n\n¿Qué quieres hacer?\n` +
@@ -788,10 +764,9 @@ async function handleActivas(telefono, estado, text, data) {
 
   if (estado === STATE_ACTIVAS_ACTION) {
     const sel = data.sel;
-    if (!sel) { await setSession(telefono, STATE_MENU, {}); return "Reinicié. Escribe `activas` de nuevo."; }
+    if (!sel) { await setSession(telefono, STATE_MENU, data); return "Reinicié. Escribe `activas` de nuevo."; }
 
     if (lower === "1") {
-      // ir directo a salida (asistencia foto)
       await setSession(telefono, STATE_ASIS_FOTO, {
         accion: "SALIDA",
         visita_id: sel.visita_id,
@@ -802,12 +777,15 @@ async function handleActivas(telefono, estado, text, data) {
     }
 
     if (lower === "2") {
-      // ir a evidencias con esa visita fija
       const marcas = await getMarcasActivas();
       await setSession(telefono, STATE_EVID_PICK_MARCA, {
         visita_id: sel.visita_id,
         tienda_nombre: sel.tienda_nombre,
         marcas,
+        _pending_evid: { ts: Date.now(), step: "PICK_MARCA", visita_id: sel.visita_id, tienda_nombre: sel.tienda_nombre },
+        active_visit_id: sel.visita_id,
+        active_tienda_id: sel.tienda_id,
+        active_tienda_nombre: sel.tienda_nombre,
       });
       let msg = `🏬 *${sel.tienda_nombre}*\n🏷️ Selecciona marca:\n\n`;
       marcas.slice(0, 10).forEach((m, i) => msg += `*${nEmoji(i)}* ${m.marca_nombre}\n`);
@@ -820,28 +798,23 @@ async function handleActivas(telefono, estado, text, data) {
         visita_id: sel.visita_id,
         tienda_id: sel.tienda_id,
         tienda_nombre: sel.tienda_nombre,
+        active_visit_id: sel.visita_id,
+        active_tienda_id: sel.tienda_id,
+        active_tienda_nombre: sel.tienda_nombre,
       });
-      return (
-        `🕒 *Asistencia* – Tienda activa: *${sel.tienda_nombre}*\n\n` +
-        `*${nEmoji(0)}* Registrar *SALIDA*\n` +
-        `*${nEmoji(1)}* Ver fotos asistencia\n` +
-        `*${nEmoji(2)}* Cambiar foto ENTRADA\n` +
-        `*${nEmoji(3)}* Cambiar foto SALIDA\n` +
-        `*${nEmoji(4)}* Volver (lista de activas)\n` +
-        `*${nEmoji(5)}* Menú`
-      );
+      return buildAsisActivaMenuText(sel.tienda_nombre);
     }
 
-    await setSession(telefono, STATE_MENU, {});
-    return menuPromotor(!!data?._pending_evid);
+    await setSession(telefono, STATE_MENU, data);
+    return "✅ Listo. Escribe `menu`.";
   }
 
-  await setSession(telefono, STATE_MENU, {});
+  await setSession(telefono, STATE_MENU, data);
   return "Reinicié. Escribe `activas`.";
 }
 
 // ==========================
-// 4) Resumen del día (por tienda + marcas)
+// Resumen del día (por tienda + marcas)
 // ==========================
 async function resumenDiaDetallado(telefono) {
   const prom = await getPromotorPorTelefono(telefono);
@@ -865,7 +838,6 @@ async function resumenDiaDetallado(telefono) {
     };
   }
 
-  // evidencias de hoy, del teléfono
   const rows = await getSheetValues("EVIDENCIAS!A2:Q");
   for (const r of rows) {
     if (norm(r[1]) !== telefono) continue;
@@ -878,7 +850,7 @@ async function resumenDiaDetallado(telefono) {
 
     const visita_id = norm(r[6]);
     const marca_id = norm(r[13]);
-    // Map visita->tienda via visits list
+
     const v = visits.find(x => x.visita_id === visita_id);
     if (!v) continue;
 
@@ -898,12 +870,10 @@ async function resumenDiaDetallado(telefono) {
 
   const tiendas = Object.values(byTienda);
   if (!tiendas.length) {
-    msg += "📭 Hoy no tienes visitas.\n";
-    msg += "\nTip: usa *Asistencia* para registrar entrada.";
+    msg += "📭 Hoy no tienes visitas.\nTip: usa *Asistencia* para registrar entrada.";
     return msg;
   }
 
-  // listado por tienda (máximo 8 para no saturar)
   tiendas.slice(0, 8).forEach((t, idx) => {
     const ent = t.entrada ? fmtDateTimeTZ(t.entrada) : "—";
     const sal = t.salida ? fmtDateTimeTZ(t.salida) : "pendiente";
@@ -923,8 +893,22 @@ async function resumenDiaDetallado(telefono) {
 }
 
 // ==========================
-// Asistencia (igual base) + reintentos guiados
+// ASISTENCIA (FIX opción 5 incluido)
 // ==========================
+function buildAsisActivaMenuText(tn) {
+  return (
+    `🕒 *Asistencia* – Tienda activa: *${tn}*\n\n` +
+    `*${nEmoji(0)}* Registrar *SALIDA*\n` +
+    `*${nEmoji(1)}* Ver fotos asistencia\n` +
+    `*${nEmoji(2)}* Cambiar foto ENTRADA\n` +
+    `*${nEmoji(3)}* Cambiar foto SALIDA\n` +
+    `*${nEmoji(4)}* Registrar ENTRADA en otra tienda\n` +   // <- esta es la opción 5 real
+    `*${nEmoji(5)}* Historial (últimas 10)\n` +
+    `*${nEmoji(6)}* Menú\n\n` +
+    "Tip: escribe `activas` para cambiar de tienda activa."
+  );
+}
+
 async function buildHistorial(promotor_id) {
   const tiendaMap = await getTiendaMap();
   const out = await getLastVisits(promotor_id, 10);
@@ -954,7 +938,7 @@ async function startAsistenciaHome(telefono) {
       "No tienes tienda activa.\n\n" +
       `*${nEmoji(0)}* Registrar *ENTRADA*\n` +
       `*${nEmoji(1)}* Historial (últimas 10)\n` +
-      `*${nEmoji(2)}* Volver al menú`
+      `*${nEmoji(2)}* Menú`
     );
   }
 
@@ -967,18 +951,12 @@ async function startAsistenciaHome(telefono) {
       visita_id: a.visita_id,
       tienda_id: a.tienda_id,
       tienda_nombre: tn,
+      active_visit_id: a.visita_id,
+      active_tienda_id: a.tienda_id,
+      active_tienda_nombre: tn,
     });
 
-    return (
-      `🕒 *Asistencia* – Tienda activa: *${tn}*\n\n` +
-      `*${nEmoji(0)}* Registrar *SALIDA*\n` +
-      `*${nEmoji(1)}* Ver fotos asistencia\n` +
-      `*${nEmoji(2)}* Cambiar foto ENTRADA\n` +
-      `*${nEmoji(3)}* Cambiar foto SALIDA\n` +
-      `*${nEmoji(4)}* Registrar ENTRADA en otra tienda\n` +
-      `*${nEmoji(5)}* Historial (últimas 10)\n` +
-      `*${nEmoji(6)}* Volver al menú`
-    );
+    return buildAsisActivaMenuText(tn);
   }
 
   await setSession(telefono, STATE_ASIS_PICK_ACTIVA, { promotor_id: prom.promotor_id });
@@ -988,7 +966,7 @@ async function startAsistenciaHome(telefono) {
     const tn = tiendaMap[a.tienda_id]?.nombre_tienda || a.tienda_id;
     msg += `*${nEmoji(idx)}* ${tn}\n`;
   });
-  msg += "\nResponde con el número.\n\nTip: también puedes usar el atajo `activas`.";
+  msg += "\nResponde con el número.\nTip: también puedes usar `activas`.";
   return msg;
 }
 
@@ -1000,13 +978,13 @@ async function handleAsistencia(telefono, estado, text, data, inbound, baseUrl) 
   const tiendaMap = await getTiendaMap();
 
   if (estado === STATE_ASIS_HOME) {
-    if (lower === "3") { await setSession(telefono, STATE_MENU, data); return menuPromotor(!!data?._pending_evid); }
+    if (lower === "3") { await setSession(telefono, STATE_MENU, data); return "✅ Listo. Escribe `menu`."; }
 
     if (lower === "1") {
       const asignadas = await getTiendasAsignadas(prom.promotor_id);
       const tiendas = asignadas.map(id => tiendaMap[id]).filter(t => t && t.activa);
 
-      await setSession(telefono, STATE_ASIS_PICK_ENTRADA, { promotor_id: prom.promotor_id, tiendas, filtradas: data.filtradas || [] });
+      await setSession(telefono, STATE_ASIS_PICK_ENTRADA, { promotor_id: prom.promotor_id, tiendas, filtradas: [] });
 
       let msg = "🏬 *Entrada* – Elige tienda o escribe texto para buscar:\n\n";
       tiendas.slice(0, 10).forEach((t, idx) => msg += `*${nEmoji(idx)}* ${t.nombre_tienda}\n`);
@@ -1035,25 +1013,18 @@ async function handleAsistencia(telefono, estado, text, data, inbound, baseUrl) 
       visita_id: a.visita_id,
       tienda_id: a.tienda_id,
       tienda_nombre: tn,
+      active_visit_id: a.visita_id,
+      active_tienda_id: a.tienda_id,
+      active_tienda_nombre: tn,
     });
 
-    return (
-      `🕒 *Asistencia* – Tienda activa: *${tn}*\n\n` +
-      `*${nEmoji(0)}* Registrar *SALIDA*\n` +
-      `*${nEmoji(1)}* Ver fotos asistencia\n` +
-      `*${nEmoji(2)}* Cambiar foto ENTRADA\n` +
-      `*${nEmoji(3)}* Cambiar foto SALIDA\n` +
-      `*${nEmoji(4)}* Volver (lista de activas)\n` +
-      `*${nEmoji(5)}* Volver al menú`
-    );
+    return buildAsisActivaMenuText(tn);
   }
 
   if (estado === STATE_ASIS_ACTIVA_MENU) {
     const tn = data.tienda_nombre || "Tienda";
 
-    if (lower === "5") return await startAsistenciaHome(telefono);
-    if (lower === "6") { await setSession(telefono, STATE_MENU, data); return menuPromotor(!!data?._pending_evid); }
-
+    // 1) SALIDA
     if (lower === "1") {
       await setSession(telefono, STATE_ASIS_FOTO, {
         accion: "SALIDA",
@@ -1065,6 +1036,7 @@ async function handleAsistencia(telefono, estado, text, data, inbound, baseUrl) 
       return `📸 Envía foto de *SALIDA* – ${tn}\n\n${tipsFoto()}`;
     }
 
+    // 2) Ver fotos asistencia
     if (lower === "2") {
       const meta = await getAsistenciaMetaByVisita(data.visita_id);
       const medias = [];
@@ -1080,6 +1052,7 @@ async function handleAsistencia(telefono, estado, text, data, inbound, baseUrl) 
       return { text: caption, mediaUrl: medias };
     }
 
+    // 3) Cambiar foto ENTRADA
     if (lower === "3") {
       const ok = await hasAsistenciaEvento(data.visita_id, "ASISTENCIA_ENTRADA");
       if (!ok) return "⚠️ No existe foto de ENTRADA para cambiar.";
@@ -1092,6 +1065,7 @@ async function handleAsistencia(telefono, estado, text, data, inbound, baseUrl) 
       return `🔁 Cambiar ENTRADA – ${tn}\n\n${tipsFoto()}`;
     }
 
+    // 4) Cambiar foto SALIDA
     if (lower === "4") {
       const ok = await hasAsistenciaEvento(data.visita_id, "ASISTENCIA_SALIDA");
       if (!ok) return "⚠️ Aún no hay SALIDA registrada. Primero registra salida.";
@@ -1104,24 +1078,34 @@ async function handleAsistencia(telefono, estado, text, data, inbound, baseUrl) 
       return `🔁 Cambiar SALIDA – ${tn}\n\n${tipsFoto()}`;
     }
 
+    // 5) ✅ FIX: Registrar ENTRADA en otra tienda
     if (lower === "5") {
       const asignadas = await getTiendasAsignadas(prom.promotor_id);
       const tiendas = asignadas.map(id => tiendaMap[id]).filter(t => t && t.activa);
+
       await setSession(telefono, STATE_ASIS_PICK_ENTRADA, { promotor_id: prom.promotor_id, tiendas, filtradas: [] });
 
-      let msg = "🏬 *Entrada* – Elige tienda o escribe texto:\n\n";
+      let msg = "🏬 *Entrada en otra tienda*\nElige tienda o escribe texto para buscar:\n\n";
       tiendas.slice(0, 10).forEach((t, idx) => msg += `*${nEmoji(idx)}* ${t.nombre_tienda}\n`);
       msg += "\nResponde con número o texto.";
       return msg;
     }
 
+    // 6) Historial
     if (lower === "6") {
       const { listado, msg } = await buildHistorial(prom.promotor_id);
       await setSession(telefono, STATE_ASIS_HIST, { listado });
       return msg;
     }
 
-    return "Responde con una opción del menú.";
+    // 7) Menú
+    if (lower === "7") {
+      await setSession(telefono, STATE_MENU, data);
+      const hasPending = !!(data?._pending_evid && pendingIsFresh(data._pending_evid));
+      return menuPromotor(hasPending);
+    }
+
+    return "Responde con una opción (1–7) o escribe `menu`.";
   }
 
   if (estado === STATE_ASIS_PICK_ENTRADA) {
@@ -1151,7 +1135,7 @@ async function handleAsistencia(telefono, estado, text, data, inbound, baseUrl) 
     const tienda = listado[idx];
 
     const open = await findOpenVisit(prom.promotor_id, tienda.tienda_id);
-    if (open) return "⚠️ Ya tienes ENTRADA abierta en esa tienda. Usa `activas` o Asistencia para registrar SALIDA.";
+    if (open) return "⚠️ Ya tienes ENTRADA abierta en esa tienda. Usa `activas` para registrar SALIDA.";
 
     await setSession(telefono, STATE_ASIS_FOTO, {
       accion: "ENTRADA",
@@ -1164,9 +1148,7 @@ async function handleAsistencia(telefono, estado, text, data, inbound, baseUrl) 
 
   if (estado === STATE_ASIS_FOTO) {
     const numMedia = safeInt(inbound?.NumMedia || "0", 0);
-    if (numMedia < 1) {
-      return `Necesito una *foto*.\n\n${tipsFoto()}`;
-    }
+    if (numMedia < 1) return `Necesito una *foto*.\n\n${tipsFoto()}`;
     const fotoUrl = inbound?.MediaUrl0 || "";
     await setSession(telefono, STATE_ASIS_UBI, { ...data, fotoUrl });
     return `✅ Foto recibida.\n\nAhora necesito tu ubicación.\n\n${tipsUbicacion()}`;
@@ -1175,9 +1157,7 @@ async function handleAsistencia(telefono, estado, text, data, inbound, baseUrl) 
   if (estado === STATE_ASIS_UBI) {
     const lat = inbound?.Latitude || inbound?.Latitude0 || "";
     const lon = inbound?.Longitude || inbound?.Longitude0 || "";
-    if (!lat || !lon) {
-      return `Necesito tu *ubicación*.\n\n${tipsUbicacion()}`;
-    }
+    if (!lat || !lon) return `Necesito tu *ubicación*.\n\n${tipsUbicacion()}`;
 
     if (data.accion === "ENTRADA") {
       const visita_id = await createVisit(data.promotor_id, data.tienda_id);
@@ -1194,8 +1174,18 @@ async function handleAsistencia(telefono, estado, text, data, inbound, baseUrl) 
         descripcion: "",
       });
 
-      await setSession(telefono, STATE_MENU, data);
-      return `✅ Entrada registrada – *${data.tienda_nombre}*\n\n` + menuPromotor(!!data?._pending_evid);
+      // set active store
+      await setSession(telefono, STATE_ASIS_ACTIVA_MENU, {
+        promotor_id: prom.promotor_id,
+        visita_id,
+        tienda_id: data.tienda_id,
+        tienda_nombre: data.tienda_nombre,
+        active_visit_id: visita_id,
+        active_tienda_id: data.tienda_id,
+        active_tienda_nombre: data.tienda_nombre,
+      });
+
+      return `✅ Entrada registrada – *${data.tienda_nombre}*\n\n` + buildAsisActivaMenuText(data.tienda_nombre);
     }
 
     await closeVisitById(data.visita_id);
@@ -1213,7 +1203,8 @@ async function handleAsistencia(telefono, estado, text, data, inbound, baseUrl) 
     });
 
     await setSession(telefono, STATE_MENU, data);
-    return `✅ Salida registrada – *${data.tienda_nombre}*\n\n` + menuPromotor(!!data?._pending_evid);
+    const hasPending = !!(data?._pending_evid && pendingIsFresh(data._pending_evid));
+    return `✅ Salida registrada – *${data.tienda_nombre}*\n\n` + menuPromotor(hasPending);
   }
 
   if (estado === STATE_ASIS_HIST) {
@@ -1267,16 +1258,16 @@ async function handleAsistencia(telefono, estado, text, data, inbound, baseUrl) 
       descripcion: `[CORRECCION_${data.tipo_evento}]`,
     });
 
-    await setSession(telefono, STATE_MENU, data);
-    return `✅ Foto actualizada (${data.tipo_evento}) – *${data.tienda_nombre}*\n\n` + menuPromotor(!!data?._pending_evid);
+    await setSession(telefono, STATE_ASIS_ACTIVA_MENU, data);
+    return `✅ Foto actualizada (${data.tipo_evento}).\n\n` + buildAsisActivaMenuText(data.tienda_nombre || "Tienda");
   }
 
   await setSession(telefono, STATE_MENU, data);
-  return menuPromotor(!!data?._pending_evid);
+  return "Reinicié. Escribe `menu`.";
 }
 
 // ==========================
-// EVIDENCIAS (captura) + POST
+// EVIDENCIAS (captura) + post
 // ==========================
 function postEvidMenu(ctx) {
   return (
@@ -1291,7 +1282,7 @@ function postEvidMenu(ctx) {
   );
 }
 
-async function startEvidencias(telefono) {
+async function startEvidencias(telefono, sessionData) {
   const prom = await getPromotorPorTelefono(telefono);
   if (!prom || !prom.activo) return "⚠️ No estás como promotor activo.";
 
@@ -1299,32 +1290,40 @@ async function startEvidencias(telefono) {
   const abiertas = await getOpenVisitsToday(prom.promotor_id);
   if (!abiertas.length) return "⚠️ No hay tienda activa (sin ENTRADA). Usa *Asistencia* para registrar entrada.";
 
-  if (abiertas.length > 1) {
+  // Preferir tienda activa en sesión si existe
+  const activeVisit = norm(sessionData?.active_visit_id || "");
+  let chosen = null;
+
+  if (activeVisit) {
+    chosen = abiertas.find(x => x.visita_id === activeVisit) || null;
+  }
+  if (!chosen && abiertas.length === 1) chosen = abiertas[0];
+
+  if (!chosen) {
     const opciones = abiertas.map(v => ({
       visita_id: v.visita_id,
       tienda_id: v.tienda_id,
       tienda_nombre: tiendaMap[v.tienda_id]?.nombre_tienda || v.tienda_id,
     }));
-    await setSession(telefono, STATE_EVID_PICK_VISITA, { promotor_id: prom.promotor_id, opciones });
+    await setSession(telefono, STATE_EVID_PICK_VISITA, { opciones });
 
     let msg = "🏬 Tienes *varias tiendas activas*. Elige una:\n\n";
     opciones.slice(0,10).forEach((o,i) => msg += `*${nEmoji(i)}* ${o.tienda_nombre}\n`);
-    msg += "\nResponde con número.\n\nTip: también puedes usar `activas`.";
+    msg += "\nResponde con número.\nTip: usa `activas` para cambiar rápido.";
     return msg;
   }
 
-  const v = abiertas[0];
-  const tn = tiendaMap[v.tienda_id]?.nombre_tienda || v.tienda_id;
-
+  const tn = tiendaMap[chosen.tienda_id]?.nombre_tienda || chosen.tienda_id;
   const marcas = await getMarcasActivas();
-  const pending = { ts: Date.now(), step: "PICK_MARCA", visita_id: v.visita_id, tienda_nombre: tn };
 
   await setSession(telefono, STATE_EVID_PICK_MARCA, {
-    promotor_id: prom.promotor_id,
-    visita_id: v.visita_id,
+    visita_id: chosen.visita_id,
     tienda_nombre: tn,
     marcas,
-    _pending_evid: pending,
+    _pending_evid: { ts: Date.now(), step: "PICK_MARCA", visita_id: chosen.visita_id, tienda_nombre: tn },
+    active_visit_id: chosen.visita_id,
+    active_tienda_id: chosen.tienda_id,
+    active_tienda_nombre: tn,
   });
 
   let msg = `🏬 *${tn}*\n🏷️ Selecciona marca:\n\n`;
@@ -1336,55 +1335,6 @@ async function startEvidencias(telefono) {
 async function handleEvidencias(telefono, estado, text, data, inbound) {
   const lower = norm(text).toLowerCase();
 
-  if (estado === STATE_EVID_POST) {
-    if (lower === "1") {
-      const regla = data.regla;
-      const pending = {
-        ts: Date.now(),
-        step: "FOTOS",
-        visita_id: data.visita_id,
-        tienda_nombre: data.tienda_nombre,
-        marca_id: data.marca_id,
-        marca_nombre: data.marca_nombre,
-        regla,
-        fase: data.fase || "NA",
-        fotos_requeridas: regla.fotos_requeridas,
-        fotos_recibidas: 0,
-      };
-      await setSession(telefono, STATE_EVID_FOTOS, { ...data, fotos_requeridas: regla.fotos_requeridas, fotos_recibidas: 0, _pending_evid: pending });
-      return `📸 Envía *${regla.fotos_requeridas}* foto(s). (Nueva tanda)\n\n${tipsFoto()}`;
-    }
-
-    if (lower === "2") {
-      const reglas = await getReglasPorMarca(data.marca_id);
-      const pending = { ts: Date.now(), step: "PICK_TIPO", visita_id: data.visita_id, tienda_nombre: data.tienda_nombre, marca_id: data.marca_id, marca_nombre: data.marca_nombre };
-      await setSession(telefono, STATE_EVID_PICK_TIPO, { ...data, reglas, _pending_evid: pending });
-
-      let msg = `🧾 Marca: *${data.marca_nombre}*\n\nTipo de evidencia:\n\n`;
-      reglas.slice(0,10).forEach((r,i) =>
-        msg += `*${nEmoji(i)}* ${r.tipo_evidencia} (fotos: ${r.fotos_requeridas}${r.requiere_antes_despues ? ", antes/después" : ""})\n`
-      );
-      msg += "\nResponde con número.";
-      return msg;
-    }
-
-    if (lower === "3") {
-      const marcas = await getMarcasActivas();
-      const pending = { ts: Date.now(), step: "PICK_MARCA", visita_id: data.visita_id, tienda_nombre: data.tienda_nombre };
-      await setSession(telefono, STATE_EVID_PICK_MARCA, { ...data, marcas, _pending_evid: pending });
-
-      let msg = `🏬 *${data.tienda_nombre}*\n🏷️ Selecciona marca:\n\n`;
-      marcas.slice(0,10).forEach((m,i) => msg += `*${nEmoji(i)}* ${m.marca_nombre}\n`);
-      msg += "\nResponde con número.";
-      return msg;
-    }
-
-    // Menú
-    const cleared = clearPendingEvid(data);
-    await setSession(telefono, STATE_MENU, cleared);
-    return menuPromotor(false);
-  }
-
   if (estado === STATE_EVID_PICK_VISITA) {
     const opciones = data.opciones || [];
     const idx = safeInt(text, -1) - 1;
@@ -1392,13 +1342,14 @@ async function handleEvidencias(telefono, estado, text, data, inbound) {
     const o = opciones[idx];
 
     const marcas = await getMarcasActivas();
-    const pending = { ts: Date.now(), step: "PICK_MARCA", visita_id: o.visita_id, tienda_nombre: o.tienda_nombre };
-
     await setSession(telefono, STATE_EVID_PICK_MARCA, {
       visita_id: o.visita_id,
       tienda_nombre: o.tienda_nombre,
       marcas,
-      _pending_evid: pending,
+      _pending_evid: { ts: Date.now(), step: "PICK_MARCA", visita_id: o.visita_id, tienda_nombre: o.tienda_nombre },
+      active_visit_id: o.visita_id,
+      active_tienda_id: o.tienda_id,
+      active_tienda_nombre: o.tienda_nombre,
     });
 
     let msg = `🏬 *${o.tienda_nombre}*\n🏷️ Selecciona marca:\n\n`;
@@ -1416,21 +1367,19 @@ async function handleEvidencias(telefono, estado, text, data, inbound) {
     const reglas = await getReglasPorMarca(marca.marca_id);
     if (!reglas.length) return `⚠️ No hay reglas activas para ${marca.marca_nombre}.`;
 
-    const pending = {
-      ts: Date.now(),
-      step: "PICK_TIPO",
-      visita_id: data.visita_id,
-      tienda_nombre: data.tienda_nombre,
-      marca_id: marca.marca_id,
-      marca_nombre: marca.marca_nombre,
-    };
-
     await setSession(telefono, STATE_EVID_PICK_TIPO, {
       ...data,
       marca_id: marca.marca_id,
       marca_nombre: marca.marca_nombre,
       reglas,
-      _pending_evid: pending,
+      _pending_evid: {
+        ts: Date.now(),
+        step: "PICK_TIPO",
+        visita_id: data.visita_id,
+        tienda_nombre: data.tienda_nombre,
+        marca_id: marca.marca_id,
+        marca_nombre: marca.marca_nombre,
+      },
     });
 
     let msg = `🏷️ Marca: *${marca.marca_nombre}*\n\n🧾 Tipo de evidencia:\n\n`;
@@ -1448,8 +1397,11 @@ async function handleEvidencias(telefono, estado, text, data, inbound) {
     const regla = reglas[idx];
 
     if (regla.requiere_antes_despues) {
-      const pending = { ...(data._pending_evid || {}), ts: Date.now(), step: "PICK_FASE", regla };
-      await setSession(telefono, STATE_EVID_PICK_FASE, { ...data, regla, _pending_evid: pending });
+      await setSession(telefono, STATE_EVID_PICK_FASE, {
+        ...data,
+        regla,
+        _pending_evid: { ...(data._pending_evid || {}), ts: Date.now(), step: "PICK_FASE", regla },
+      });
       return `🧾 *${regla.tipo_evidencia}*\n\n*${nEmoji(0)}* ANTES\n*${nEmoji(1)}* DESPUÉS`;
     }
 
@@ -1562,7 +1514,6 @@ async function handleEvidencias(telefono, estado, text, data, inbound) {
       return `✅ Recibí *${accepted}* foto(s)${ignored ? ` (ignoré ${ignored} extra)` : ""}.\n📌 Faltan *${faltan}*.\n\n${tipsFoto()}`;
     }
 
-    // terminado -> menú post
     const ctx = {
       tienda_nombre: data.tienda_nombre,
       marca_id: data.marca_id,
@@ -1571,21 +1522,65 @@ async function handleEvidencias(telefono, estado, text, data, inbound) {
       regla: data.regla,
       visita_id: data.visita_id,
       fase: data.fase || "NA",
+      _pending_evid: { ts: Date.now(), step: "POST", visita_id: data.visita_id, tienda_nombre: data.tienda_nombre, marca_id: data.marca_id, marca_nombre: data.marca_nombre, regla: data.regla, fase: data.fase || "NA", tipo_evidencia: data.regla.tipo_evidencia },
     };
 
-    const pending = { ts: Date.now(), step: "POST", ...ctx };
-
-    await setSession(telefono, STATE_EVID_POST, { ...ctx, _pending_evid: pending });
-
+    await setSession(telefono, STATE_EVID_POST, ctx);
     return postEvidMenu(ctx) + (ignored ? `\nℹ️ Ignoré ${ignored} foto(s) extra.` : "");
   }
 
+  if (estado === STATE_EVID_POST) {
+    if (lower === "1") {
+      const regla = data.regla;
+      const pending = {
+        ts: Date.now(),
+        step: "FOTOS",
+        visita_id: data.visita_id,
+        tienda_nombre: data.tienda_nombre,
+        marca_id: data.marca_id,
+        marca_nombre: data.marca_nombre,
+        regla,
+        fase: data.fase || "NA",
+        fotos_requeridas: regla.fotos_requeridas,
+        fotos_recibidas: 0,
+      };
+      await setSession(telefono, STATE_EVID_FOTOS, { ...data, fotos_requeridas: regla.fotos_requeridas, fotos_recibidas: 0, _pending_evid: pending });
+      return `📸 Envía *${regla.fotos_requeridas}* foto(s). (Nueva tanda)\n\n${tipsFoto()}`;
+    }
+
+    if (lower === "2") {
+      const reglas = await getReglasPorMarca(data.marca_id);
+      await setSession(telefono, STATE_EVID_PICK_TIPO, { ...data, reglas, _pending_evid: { ts: Date.now(), step: "PICK_TIPO", visita_id: data.visita_id, tienda_nombre: data.tienda_nombre, marca_id: data.marca_id, marca_nombre: data.marca_nombre } });
+
+      let msg = `🧾 Marca: *${data.marca_nombre}*\n\nTipo de evidencia:\n\n`;
+      reglas.slice(0,10).forEach((r,i) =>
+        msg += `*${nEmoji(i)}* ${r.tipo_evidencia} (fotos: ${r.fotos_requeridas}${r.requiere_antes_despues ? ", antes/después" : ""})\n`
+      );
+      msg += "\nResponde con número.";
+      return msg;
+    }
+
+    if (lower === "3") {
+      const marcas = await getMarcasActivas();
+      await setSession(telefono, STATE_EVID_PICK_MARCA, { ...data, marcas, _pending_evid: { ts: Date.now(), step: "PICK_MARCA", visita_id: data.visita_id, tienda_nombre: data.tienda_nombre } });
+
+      let msg = `🏬 *${data.tienda_nombre}*\n🏷️ Selecciona marca:\n\n`;
+      marcas.slice(0,10).forEach((m,i) => msg += `*${nEmoji(i)}* ${m.marca_nombre}\n`);
+      msg += "\nResponde con número.";
+      return msg;
+    }
+
+    await setSession(telefono, STATE_MENU, data);
+    const hasPending = !!(data?._pending_evid && pendingIsFresh(data._pending_evid));
+    return menuPromotor(hasPending);
+  }
+
   await setSession(telefono, STATE_MENU, data);
-  return menuPromotor(!!data?._pending_evid);
+  return "Reinicié. Escribe `menu`.";
 }
 
 // ==========================
-// MIS EVIDENCIAS (lista + ver/anular/reemplazar/nota)
+// MIS EVIDENCIAS (consulta + anular/reemplazar/nota)
 // ==========================
 async function startMisEvidencias(telefono, baseUrl) {
   const prom = await getPromotorPorTelefono(telefono);
@@ -1730,12 +1725,10 @@ async function handleMisEvidencias(telefono, estado, text, data, inbound, baseUr
         e.evidencia_id,
         `${makeStatusTag("STATUS", "ANULADA")}${motivo ? " " + makeStatusTag("MOTIVO", motivo) : ""} ${makeStatusTag("TS", nowISO())}`
       );
-
       if (!ok) return "⚠️ No encontré esa evidencia en Sheets.";
 
       const newList = list.filter((_, i) => i !== idx);
       await setSession(telefono, STATE_MY_EVID_LIST, { ...data, list: newList });
-
       return `✅ Evidencia #${idx+1} anulada.${motivo ? "\n📝 Motivo: " + motivo : ""}`;
     }
 
@@ -1751,7 +1744,6 @@ async function handleMisEvidencias(telefono, estado, text, data, inbound, baseUr
         `${makeStatusTag("NOTA", nota)} ${makeStatusTag("TS", nowISO())}`
       );
       if (!ok) return "⚠️ No encontré esa evidencia en Sheets.";
-
       return `✅ Nota actualizada en evidencia #${idx+1}.`;
     }
 
@@ -1786,7 +1778,6 @@ async function handleMisEvidencias(telefono, estado, text, data, inbound, baseUr
 
     const target = data.target;
     const motivo = norm(data.motivo || "");
-
     const newId = `EV-${Date.now()}-R`;
 
     await registrarEvidencia({
@@ -1812,16 +1803,15 @@ async function handleMisEvidencias(telefono, estado, text, data, inbound, baseUr
     const newList = list.filter((_, i) => i !== idx);
 
     await setSession(telefono, STATE_MY_EVID_LIST, { tiendaSel: data.tiendaSel, list: newList });
-
     return `✅ Evidencia #${idx+1} reemplazada.\n🆕 Nueva evidencia: ${newId}`;
   }
 
   await setSession(telefono, STATE_MENU, data);
-  return menuPromotor(!!data?._pending_evid);
+  return "Reinicié. Escribe `menu`.";
 }
 
 // ==========================
-// Supervisor: se conserva (no prioridad en esta fase)
+// Supervisor (mínimo; lo robustecemos después)
 // ==========================
 async function getEvidenciasHoyForSupervisor() {
   const rows = await getSheetValues("EVIDENCIAS!A2:Q");
@@ -1867,13 +1857,10 @@ async function enviarFotoAGrupoCliente(ev, grupo, baseUrl) {
 }
 
 async function handleSupervisor(telefono, estado, text, data, baseUrl) {
-  // dejamos igual tu versión “mínima” (la robustecemos en siguiente fase)
   const lower = norm(text).toLowerCase();
   const sup = await getSupervisorPorTelefono(telefono);
   if (!sup) { await setSession(telefono, STATE_MENU, data); return "⚠️ No eres supervisor activo."; }
 
-  if (lower === "menu") { await setSession(telefono, STATE_MENU, data); return menuPromotor(!!data?._pending_evid); }
-  if (lower === "ayuda") return "🆘 Supervisor\n\nComandos: `ver N`, `enviar 1,3`, `enviar todas`.";
   if (lower === "sup") {
     await setSession(telefono, STATE_SUP_MENU, data);
     return `👋 *${sup.nombre || "Supervisor"}*\n\n*${nEmoji(0)}* Evidencias hoy por promotor\n*${nEmoji(1)}* Evidencias hoy MEDIO/ALTO`;
@@ -1996,7 +1983,7 @@ async function handleSupervisor(telefono, estado, text, data, baseUrl) {
 }
 
 // ==========================
-// Router principal + comandos globales
+// Router principal
 // ==========================
 async function handleIncoming(from, body, inbound, baseUrl) {
   const telefono = norm(from);
@@ -2013,31 +2000,24 @@ async function handleIncoming(from, body, inbound, baseUrl) {
 
   const estado = ses.estado_actual;
   const data = ses.data_json || {};
+  const hasPending = !!(data?._pending_evid && pendingIsFresh(data._pending_evid));
 
-  // Global: menu NO borra pendiente
+  // Global
   if (lower === "menu" || lower === "inicio") {
     await setSession(telefono, STATE_MENU, data);
-    return menuPromotor(!!data?._pending_evid);
+    return menuPromotor(hasPending);
   }
-
-  // Global: ayuda contextual
   if (lower === "ayuda" || lower === "help" || lower === "?") {
     return ayudaContextual(estado);
   }
-
-  // Global: atajo activas
   if (lower === "activas") {
     return await showActivasMenu(telefono);
   }
-
-  // Global: continuar evidencia pendiente
   if (lower === "continuar" || lower === "reanudar") {
     const resumed = await resumePendingEvidence(telefono, data);
     if (resumed) return resumed;
     return "📭 No tengo evidencia pendiente para continuar. Usa *Evidencias* para iniciar.";
   }
-
-  // Global: supervisor
   if (lower === "sup") {
     const sup = await getSupervisorPorTelefono(telefono);
     if (!sup) return "⚠️ Tu número no está dado de alta como supervisor.";
@@ -2045,81 +2025,74 @@ async function handleIncoming(from, body, inbound, baseUrl) {
     return `👋 *${sup.nombre || "Supervisor"}*\n\n*${nEmoji(0)}* Evidencias hoy por promotor\n*${nEmoji(1)}* Evidencias hoy MEDIO/ALTO`;
   }
 
-  // Atajo activas flow
+  // Subflujos
   if ([STATE_ACTIVAS_PICK, STATE_ACTIVAS_ACTION].includes(estado)) {
     return await handleActivas(telefono, estado, text, data);
   }
-
-  // Supervisor flow
   if ([STATE_SUP_MENU, STATE_SUP_PROMOTOR_LIST, STATE_SUP_FOTOS_LIST, STATE_SUP_ELEGIR_GRUPO].includes(estado)) {
     return await handleSupervisor(telefono, estado, text, data, baseUrl);
   }
+  if ([STATE_ASIS_HOME, STATE_ASIS_PICK_ENTRADA, STATE_ASIS_PICK_ACTIVA, STATE_ASIS_ACTIVA_MENU, STATE_ASIS_FOTO, STATE_ASIS_UBI, STATE_ASIS_HIST, STATE_ASIS_CAMBIAR_FOTO].includes(estado)) {
+    return await handleAsistencia(telefono, estado, text, data, inbound, baseUrl);
+  }
+  if ([STATE_EVID_PICK_VISITA, STATE_EVID_PICK_MARCA, STATE_EVID_PICK_TIPO, STATE_EVID_PICK_FASE, STATE_EVID_FOTOS, STATE_EVID_POST].includes(estado)) {
+    return await handleEvidencias(telefono, estado, text, data, inbound);
+  }
+  if ([STATE_MY_EVID_PICK_TIENDA, STATE_MY_EVID_LIST, STATE_MY_EVID_REPLACE].includes(estado)) {
+    return await handleMisEvidencias(telefono, estado, text, data, inbound, baseUrl);
+  }
 
-  // Menu promotor (con opción de continuar si aplica)
+  // MENU: selección
   if (estado === STATE_MENU) {
-    const hasPending = !!(data?._pending_evid && pendingIsFresh(data._pending_evid));
-
-    // Si el usuario elige “6” y hay pendiente, reanuda
-    if (lower === "6" && hasPending) {
-      const resumed = await resumePendingEvidence(telefono, data);
-      if (resumed) return resumed;
-    }
-
     if (lower === "1") { await setSession(telefono, STATE_ASIS_HOME, data); return await startAsistenciaHome(telefono); }
 
     if (lower === "2") {
-      // si hay pendiente fresca, ofrece continuar primero
       if (hasPending) {
-        await setSession(telefono, STATE_MENU, data);
+        await setSession(telefono, STATE_MENU_EVID_PENDING, data);
         return (
           "⏯️ Tienes una evidencia pendiente.\n\n" +
           `*${nEmoji(0)}* Continuar\n` +
-          `*${nEmoji(1)}* Iniciar nueva\n\n` +
-          "Responde 1 o 2."
+          `*${nEmoji(1)}* Iniciar nueva\n` +
+          `*${nEmoji(2)}* Cancelar\n`
         );
       }
-      return await startEvidencias(telefono);
+      return await startEvidencias(telefono, data);
     }
 
-    if (lower === "3") { return await startMisEvidencias(telefono, baseUrl); }
+    if (lower === "3") { await setSession(telefono, STATE_MY_EVID_PICK_TIENDA, data); return await startMisEvidencias(telefono, baseUrl); }
 
     if (lower === "4") { return await resumenDiaDetallado(telefono); }
 
     if (lower === "5") { return ayudaContextual(STATE_MENU); }
 
-    // Si venía del prompt “continuar/nueva” (opción 2), resolvemos aquí
-    if (lower === "1" && hasPending && data?._pending_evid && data?._pending_evid?.step) {
+    if (lower === "6" && hasPending) {
       const resumed = await resumePendingEvidence(telefono, data);
       if (resumed) return resumed;
-    }
-    if (lower === "2" && hasPending) {
-      // iniciar nueva evid: limpiar pending y arrancar
-      const cleared = clearPendingEvid(data);
-      await setSession(telefono, STATE_MENU, cleared);
-      return await startEvidencias(telefono);
     }
 
     return menuPromotor(hasPending);
   }
 
-  // Asistencia
-  if ([STATE_ASIS_HOME, STATE_ASIS_PICK_ENTRADA, STATE_ASIS_PICK_ACTIVA, STATE_ASIS_ACTIVA_MENU, STATE_ASIS_FOTO, STATE_ASIS_UBI, STATE_ASIS_HIST, STATE_ASIS_CAMBIAR_FOTO].includes(estado)) {
-    return await handleAsistencia(telefono, estado, text, data, inbound, baseUrl);
+  if (estado === STATE_MENU_EVID_PENDING) {
+    if (lower === "1") {
+      const resumed = await resumePendingEvidence(telefono, data);
+      if (resumed) return resumed;
+      await setSession(telefono, STATE_MENU, data);
+      return "📭 Ya no hay evidencia pendiente.\n\n" + menuPromotor(false);
+    }
+    if (lower === "2") {
+      // iniciar nueva evidencia (manteniendo tienda activa)
+      const cleared = { ...data };
+      delete cleared._pending_evid;
+      await setSession(telefono, STATE_MENU, cleared);
+      return await startEvidencias(telefono, cleared);
+    }
+    await setSession(telefono, STATE_MENU, data);
+    return menuPromotor(hasPending);
   }
 
-  // Evidencias
-  if ([STATE_EVID_PICK_VISITA, STATE_EVID_PICK_MARCA, STATE_EVID_PICK_TIPO, STATE_EVID_PICK_FASE, STATE_EVID_FOTOS, STATE_EVID_POST].includes(estado)) {
-    return await handleEvidencias(telefono, estado, text, data, inbound);
-  }
-
-  // Mis evidencias
-  if ([STATE_MY_EVID_PICK_TIENDA, STATE_MY_EVID_LIST, STATE_MY_EVID_REPLACE].includes(estado)) {
-    return await handleMisEvidencias(telefono, estado, text, data, inbound, baseUrl);
-  }
-
-  // fallback
   await setSession(telefono, STATE_MENU, data);
-  return menuPromotor(!!data?._pending_evid);
+  return menuPromotor(hasPending);
 }
 
 // ==========================
@@ -2139,7 +2112,7 @@ app.post("/whatsapp", async (req, res) => {
       respuesta = "Ocurrió un error procesando tu mensaje. Intenta de nuevo 🙏";
     }
 
-    // guardar meta idempotencia (texto)
+    // meta idempotencia (texto)
     const sid = norm(req.body.MessageSid || "");
     if (sid) {
       const respText =
