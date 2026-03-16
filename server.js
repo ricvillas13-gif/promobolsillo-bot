@@ -257,7 +257,7 @@ const STATE_MY_EVID_REPLACE = "MY_EVID_REPLACE";
 const STATE_ACTIVAS_PICK = "ACTIVAS_PICK";
 const STATE_ACTIVAS_ACTION = "ACTIVAS_ACTION";
 
-// Supervisor (se mantiene)
+// Supervisor (mínimo)
 const STATE_SUP_MENU = "SUP_MENU";
 const STATE_SUP_PROMOTOR_LIST = "SUP_PROMOTOR_LIST";
 const STATE_SUP_FOTOS_LIST = "SUP_FOTOS_LIST";
@@ -520,6 +520,9 @@ function tagAppend(desc, tag) {
 function makeStatusTag(k, v) {
   return `${k}=${(v || "").toString().replace(/\|/g, "/")}`;
 }
+function isEvidenciaCancelada(desc) {
+  return upper(desc).includes("STATUS=ANULADA") || upper(desc).includes("STATUS=REEMPLAZADA");
+}
 
 async function registrarEvidencia(payload) {
   const a = demoAnalisis(payload.tipo_evento);
@@ -564,10 +567,6 @@ async function updateEvidenciaDescripcion(evidencia_id, patchText) {
   return true;
 }
 
-function isEvidenciaCancelada(desc) {
-  return upper(desc).includes("STATUS=ANULADA") || upper(desc).includes("STATUS=REEMPLAZADA");
-}
-
 async function hasAsistenciaEvento(visita_id, tipo_evento) {
   const rows = await getSheetValues("EVIDENCIAS!A2:Q");
   for (const r of rows) {
@@ -600,7 +599,7 @@ async function getAsistenciaMetaByVisita(visita_id) {
 }
 
 // ==========================
-// Pending evidence (continuar)
+// Pending evidence (continuar) – FIX COMPLETO
 // ==========================
 function pendingIsFresh(p) {
   const ts = safeInt(p?.ts || 0, 0);
@@ -612,6 +611,123 @@ async function resumePendingEvidence(telefono, sessionData) {
   const p = sessionData?._pending_evid;
   if (!p || !pendingIsFresh(p)) return null;
 
+  // 1) Reanudar selección de TIENDA (si aplica)
+  if (p.step === "PICK_VISITA") {
+    const prom = await getPromotorPorTelefono(telefono);
+    if (!prom || !prom.activo) return null;
+
+    const tiendaMap = await getTiendaMap();
+    const abiertas = await getOpenVisitsToday(prom.promotor_id);
+    if (!abiertas.length) return null;
+
+    // Si solo hay una activa, brinca directo a marca
+    if (abiertas.length === 1) {
+      const v = abiertas[0];
+      const tn = tiendaMap[v.tienda_id]?.nombre_tienda || v.tienda_id;
+      const marcas = await getMarcasActivas();
+
+      await setSession(telefono, STATE_EVID_PICK_MARCA, {
+        ...sessionData,
+        visita_id: v.visita_id,
+        tienda_nombre: tn,
+        marcas,
+        _pending_evid: { ts: Date.now(), step: "PICK_MARCA", visita_id: v.visita_id, tienda_nombre: tn },
+        active_visit_id: v.visita_id,
+        active_tienda_id: v.tienda_id,
+        active_tienda_nombre: tn,
+      });
+
+      let msg = `⏯️ *Continuando evidencia pendiente*\n🏬 *${tn}*\n\n🏷️ Selecciona marca:\n\n`;
+      marcas.slice(0, 10).forEach((m, i) => (msg += `*${nEmoji(i)}* ${m.marca_nombre}\n`));
+      msg += "\nResponde con número.";
+      return msg;
+    }
+
+    const opciones = abiertas.map((v) => ({
+      visita_id: v.visita_id,
+      tienda_id: v.tienda_id,
+      tienda_nombre: tiendaMap[v.tienda_id]?.nombre_tienda || v.tienda_id,
+    }));
+
+    await setSession(telefono, STATE_EVID_PICK_VISITA, {
+      ...sessionData,
+      opciones,
+      _pending_evid: { ts: Date.now(), step: "PICK_VISITA" },
+    });
+
+    let msg = "⏯️ *Continuando evidencia pendiente*\n\n🏬 Elige tienda activa:\n\n";
+    opciones.slice(0, 10).forEach((o, i) => (msg += `*${nEmoji(i)}* ${o.tienda_nombre}\n`));
+    msg += "\nResponde con número.";
+    return msg;
+  }
+
+  // 2) Reanudar selección de MARCA
+  if (p.step === "PICK_MARCA") {
+    const marcas = await getMarcasActivas();
+    if (!marcas.length) return null;
+
+    await setSession(telefono, STATE_EVID_PICK_MARCA, {
+      ...sessionData,
+      visita_id: p.visita_id,
+      tienda_nombre: p.tienda_nombre,
+      marcas,
+      _pending_evid: { ...p, ts: Date.now() },
+      active_visit_id: p.visita_id,
+      active_tienda_nombre: p.tienda_nombre,
+    });
+
+    let msg = `⏯️ *Continuando evidencia pendiente*\n🏬 *${p.tienda_nombre}*\n\n🏷️ Selecciona marca:\n\n`;
+    marcas.slice(0, 10).forEach((m, i) => (msg += `*${nEmoji(i)}* ${m.marca_nombre}\n`));
+    msg += "\nResponde con número.";
+    return msg;
+  }
+
+  // 3) Reanudar selección de TIPO
+  if (p.step === "PICK_TIPO") {
+    if (!p.marca_id) return null;
+    const reglas = await getReglasPorMarca(p.marca_id);
+    if (!reglas.length) return null;
+
+    await setSession(telefono, STATE_EVID_PICK_TIPO, {
+      ...sessionData,
+      visita_id: p.visita_id,
+      tienda_nombre: p.tienda_nombre,
+      marca_id: p.marca_id,
+      marca_nombre: p.marca_nombre,
+      reglas,
+      _pending_evid: { ...p, ts: Date.now() },
+    });
+
+    let msg = `⏯️ *Continuando evidencia pendiente*\n🏬 *${p.tienda_nombre}*\n🏷️ *${p.marca_nombre}*\n\n🧾 Tipo de evidencia:\n\n`;
+    reglas.slice(0, 10).forEach((r, i) => {
+      msg += `*${nEmoji(i)}* ${r.tipo_evidencia} (fotos: ${r.fotos_requeridas}${r.requiere_antes_despues ? ", antes/después" : ""})\n`;
+    });
+    msg += "\nResponde con número.";
+    return msg;
+  }
+
+  // 4) Reanudar selección de FASE (antes/después)
+  if (p.step === "PICK_FASE") {
+    if (!p.regla) return null;
+
+    await setSession(telefono, STATE_EVID_PICK_FASE, {
+      ...sessionData,
+      visita_id: p.visita_id,
+      tienda_nombre: p.tienda_nombre,
+      marca_id: p.marca_id,
+      marca_nombre: p.marca_nombre,
+      regla: p.regla,
+      _pending_evid: { ...p, ts: Date.now() },
+    });
+
+    return (
+      `⏯️ *Continuando evidencia pendiente*\n🏬 *${p.tienda_nombre}*\n🏷️ *${p.marca_nombre}*\n\n` +
+      `🧾 *${p.regla.tipo_evidencia}*\n\n` +
+      `*${nEmoji(0)}* ANTES\n*${nEmoji(1)}* DESPUÉS`
+    );
+  }
+
+  // 5) Reanudar envío de FOTOS
   if (p.step === "FOTOS") {
     await setSession(telefono, STATE_EVID_FOTOS, {
       ...sessionData,
@@ -623,7 +739,9 @@ async function resumePendingEvidence(telefono, sessionData) {
       fase: p.fase || "NA",
       fotos_requeridas: p.fotos_requeridas,
       fotos_recibidas: p.fotos_recibidas || 0,
+      _pending_evid: { ...p, ts: Date.now() },
     });
+
     const faltan = Math.max(0, (p.fotos_requeridas || 1) - (p.fotos_recibidas || 0));
     return (
       `⏯️ *Continuando evidencia pendiente*\n` +
@@ -635,8 +753,14 @@ async function resumePendingEvidence(telefono, sessionData) {
     );
   }
 
+  // 6) Reanudar post-menú de evidencia
   if (p.step === "POST") {
-    await setSession(telefono, STATE_EVID_POST, { ...sessionData, ...p });
+    await setSession(telefono, STATE_EVID_POST, {
+      ...sessionData,
+      ...p,
+      _pending_evid: { ...p, ts: Date.now() },
+    });
+
     return (
       "⏯️ *Continuando*\n\n" +
       "Tu última evidencia ya quedó completa.\n" +
@@ -742,7 +866,7 @@ async function showActivasMenu(telefono) {
   return msg;
 }
 
-async function handleActivas(telefono, estado, text, data) {
+async function handleActivas(telefono, estado, text, data, baseUrl) {
   const lower = norm(text).toLowerCase();
 
   if (estado === STATE_ACTIVAS_PICK) {
@@ -850,6 +974,8 @@ async function resumenDiaDetallado(telefono) {
 
     const visita_id = norm(r[6]);
     const marca_id = norm(r[13]);
+    const desc = norm(r[16] || "");
+    if (isEvidenciaCancelada(desc)) continue;
 
     const v = visits.find(x => x.visita_id === visita_id);
     if (!v) continue;
@@ -893,7 +1019,7 @@ async function resumenDiaDetallado(telefono) {
 }
 
 // ==========================
-// ASISTENCIA (FIX opción 5 incluido)
+// ASISTENCIA (menú tienda activa con opción 5 correcta)
 // ==========================
 function buildAsisActivaMenuText(tn) {
   return (
@@ -902,7 +1028,7 @@ function buildAsisActivaMenuText(tn) {
     `*${nEmoji(1)}* Ver fotos asistencia\n` +
     `*${nEmoji(2)}* Cambiar foto ENTRADA\n` +
     `*${nEmoji(3)}* Cambiar foto SALIDA\n` +
-    `*${nEmoji(4)}* Registrar ENTRADA en otra tienda\n` +   // <- esta es la opción 5 real
+    `*${nEmoji(4)}* Registrar ENTRADA en otra tienda\n` + // opción 5 real
     `*${nEmoji(5)}* Historial (últimas 10)\n` +
     `*${nEmoji(6)}* Menú\n\n` +
     "Tip: escribe `activas` para cambiar de tienda activa."
@@ -978,7 +1104,7 @@ async function handleAsistencia(telefono, estado, text, data, inbound, baseUrl) 
   const tiendaMap = await getTiendaMap();
 
   if (estado === STATE_ASIS_HOME) {
-    if (lower === "3") { await setSession(telefono, STATE_MENU, data); return "✅ Listo. Escribe `menu`."; }
+    if (lower === "3") { await setSession(telefono, STATE_MENU, data); return menuPromotor(!!(data?._pending_evid && pendingIsFresh(data._pending_evid))); }
 
     if (lower === "1") {
       const asignadas = await getTiendasAsignadas(prom.promotor_id);
@@ -1078,7 +1204,7 @@ async function handleAsistencia(telefono, estado, text, data, inbound, baseUrl) 
       return `🔁 Cambiar SALIDA – ${tn}\n\n${tipsFoto()}`;
     }
 
-    // 5) ✅ FIX: Registrar ENTRADA en otra tienda
+    // 5) ENTRADA en otra tienda
     if (lower === "5") {
       const asignadas = await getTiendasAsignadas(prom.promotor_id);
       const tiendas = asignadas.map(id => tiendaMap[id]).filter(t => t && t.activa);
@@ -1174,7 +1300,6 @@ async function handleAsistencia(telefono, estado, text, data, inbound, baseUrl) 
         descripcion: "",
       });
 
-      // set active store
       await setSession(telefono, STATE_ASIS_ACTIVA_MENU, {
         promotor_id: prom.promotor_id,
         visita_id,
@@ -1267,7 +1392,7 @@ async function handleAsistencia(telefono, estado, text, data, inbound, baseUrl) 
 }
 
 // ==========================
-// EVIDENCIAS (captura) + post
+// EVIDENCIAS
 // ==========================
 function postEvidMenu(ctx) {
   return (
@@ -1290,13 +1415,9 @@ async function startEvidencias(telefono, sessionData) {
   const abiertas = await getOpenVisitsToday(prom.promotor_id);
   if (!abiertas.length) return "⚠️ No hay tienda activa (sin ENTRADA). Usa *Asistencia* para registrar entrada.";
 
-  // Preferir tienda activa en sesión si existe
   const activeVisit = norm(sessionData?.active_visit_id || "");
   let chosen = null;
-
-  if (activeVisit) {
-    chosen = abiertas.find(x => x.visita_id === activeVisit) || null;
-  }
+  if (activeVisit) chosen = abiertas.find(x => x.visita_id === activeVisit) || null;
   if (!chosen && abiertas.length === 1) chosen = abiertas[0];
 
   if (!chosen) {
@@ -1305,7 +1426,7 @@ async function startEvidencias(telefono, sessionData) {
       tienda_id: v.tienda_id,
       tienda_nombre: tiendaMap[v.tienda_id]?.nombre_tienda || v.tienda_id,
     }));
-    await setSession(telefono, STATE_EVID_PICK_VISITA, { opciones });
+    await setSession(telefono, STATE_EVID_PICK_VISITA, { opciones, _pending_evid: { ts: Date.now(), step: "PICK_VISITA" } });
 
     let msg = "🏬 Tienes *varias tiendas activas*. Elige una:\n\n";
     opciones.slice(0,10).forEach((o,i) => msg += `*${nEmoji(i)}* ${o.tienda_nombre}\n`);
@@ -1522,7 +1643,17 @@ async function handleEvidencias(telefono, estado, text, data, inbound) {
       regla: data.regla,
       visita_id: data.visita_id,
       fase: data.fase || "NA",
-      _pending_evid: { ts: Date.now(), step: "POST", visita_id: data.visita_id, tienda_nombre: data.tienda_nombre, marca_id: data.marca_id, marca_nombre: data.marca_nombre, regla: data.regla, fase: data.fase || "NA", tipo_evidencia: data.regla.tipo_evidencia },
+      _pending_evid: {
+        ts: Date.now(),
+        step: "POST",
+        visita_id: data.visita_id,
+        tienda_nombre: data.tienda_nombre,
+        marca_id: data.marca_id,
+        marca_nombre: data.marca_nombre,
+        regla: data.regla,
+        fase: data.fase || "NA",
+        tipo_evidencia: data.regla.tipo_evidencia,
+      },
     };
 
     await setSession(telefono, STATE_EVID_POST, ctx);
@@ -1550,7 +1681,11 @@ async function handleEvidencias(telefono, estado, text, data, inbound) {
 
     if (lower === "2") {
       const reglas = await getReglasPorMarca(data.marca_id);
-      await setSession(telefono, STATE_EVID_PICK_TIPO, { ...data, reglas, _pending_evid: { ts: Date.now(), step: "PICK_TIPO", visita_id: data.visita_id, tienda_nombre: data.tienda_nombre, marca_id: data.marca_id, marca_nombre: data.marca_nombre } });
+      await setSession(telefono, STATE_EVID_PICK_TIPO, {
+        ...data,
+        reglas,
+        _pending_evid: { ts: Date.now(), step: "PICK_TIPO", visita_id: data.visita_id, tienda_nombre: data.tienda_nombre, marca_id: data.marca_id, marca_nombre: data.marca_nombre },
+      });
 
       let msg = `🧾 Marca: *${data.marca_nombre}*\n\nTipo de evidencia:\n\n`;
       reglas.slice(0,10).forEach((r,i) =>
@@ -1562,7 +1697,11 @@ async function handleEvidencias(telefono, estado, text, data, inbound) {
 
     if (lower === "3") {
       const marcas = await getMarcasActivas();
-      await setSession(telefono, STATE_EVID_PICK_MARCA, { ...data, marcas, _pending_evid: { ts: Date.now(), step: "PICK_MARCA", visita_id: data.visita_id, tienda_nombre: data.tienda_nombre } });
+      await setSession(telefono, STATE_EVID_PICK_MARCA, {
+        ...data,
+        marcas,
+        _pending_evid: { ts: Date.now(), step: "PICK_MARCA", visita_id: data.visita_id, tienda_nombre: data.tienda_nombre },
+      });
 
       let msg = `🏬 *${data.tienda_nombre}*\n🏷️ Selecciona marca:\n\n`;
       marcas.slice(0,10).forEach((m,i) => msg += `*${nEmoji(i)}* ${m.marca_nombre}\n`);
@@ -1606,6 +1745,8 @@ async function startMisEvidencias(telefono, baseUrl) {
 
     const visita_id = norm(r[6]);
     const tid = visitaToTienda[visita_id] || "SIN_TIENDA";
+    const desc = norm(r[16] || "");
+    if (isEvidenciaCancelada(desc)) continue;
     countByTienda[tid] = (countByTienda[tid] || 0) + 1;
   }
 
@@ -1811,7 +1952,7 @@ async function handleMisEvidencias(telefono, estado, text, data, inbound, baseUr
 }
 
 // ==========================
-// Supervisor (mínimo; lo robustecemos después)
+// Supervisor (mínimo)
 // ==========================
 async function getEvidenciasHoyForSupervisor() {
   const rows = await getSheetValues("EVIDENCIAS!A2:Q");
@@ -2016,7 +2157,7 @@ async function handleIncoming(from, body, inbound, baseUrl) {
   if (lower === "continuar" || lower === "reanudar") {
     const resumed = await resumePendingEvidence(telefono, data);
     if (resumed) return resumed;
-    return "📭 No tengo evidencia pendiente para continuar. Usa *Evidencias* para iniciar.";
+    return "⚠️ No pude reanudar automáticamente. Entra a *Evidencias* y continúa manualmente desde el último paso.";
   }
   if (lower === "sup") {
     const sup = await getSupervisorPorTelefono(telefono);
@@ -2027,7 +2168,7 @@ async function handleIncoming(from, body, inbound, baseUrl) {
 
   // Subflujos
   if ([STATE_ACTIVAS_PICK, STATE_ACTIVAS_ACTION].includes(estado)) {
-    return await handleActivas(telefono, estado, text, data);
+    return await handleActivas(telefono, estado, text, data, baseUrl);
   }
   if ([STATE_SUP_MENU, STATE_SUP_PROMOTOR_LIST, STATE_SUP_FOTOS_LIST, STATE_SUP_ELEGIR_GRUPO].includes(estado)) {
     return await handleSupervisor(telefono, estado, text, data, baseUrl);
@@ -2053,7 +2194,7 @@ async function handleIncoming(from, body, inbound, baseUrl) {
           "⏯️ Tienes una evidencia pendiente.\n\n" +
           `*${nEmoji(0)}* Continuar\n` +
           `*${nEmoji(1)}* Iniciar nueva\n` +
-          `*${nEmoji(2)}* Cancelar\n`
+          `*${nEmoji(2)}* Menú\n`
         );
       }
       return await startEvidencias(telefono, data);
@@ -2073,20 +2214,28 @@ async function handleIncoming(from, body, inbound, baseUrl) {
     return menuPromotor(hasPending);
   }
 
+  // ✅ FIX: no decir “ya no hay pendiente” si no se pudo reanudar
   if (estado === STATE_MENU_EVID_PENDING) {
     if (lower === "1") {
       const resumed = await resumePendingEvidence(telefono, data);
       if (resumed) return resumed;
-      await setSession(telefono, STATE_MENU, data);
-      return "📭 Ya no hay evidencia pendiente.\n\n" + menuPromotor(false);
+
+      await setSession(telefono, STATE_MENU_EVID_PENDING, data);
+      return (
+        "⚠️ No pude reanudar automáticamente la evidencia pendiente.\n\n" +
+        `*${nEmoji(0)}* Intentar de nuevo (Continuar)\n` +
+        `*${nEmoji(1)}* Iniciar nueva\n` +
+        `*${nEmoji(2)}* Menú`
+      );
     }
+
     if (lower === "2") {
-      // iniciar nueva evidencia (manteniendo tienda activa)
       const cleared = { ...data };
       delete cleared._pending_evid;
       await setSession(telefono, STATE_MENU, cleared);
       return await startEvidencias(telefono, cleared);
     }
+
     await setSession(telefono, STATE_MENU, data);
     return menuPromotor(hasPending);
   }
